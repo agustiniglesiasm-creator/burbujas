@@ -1132,8 +1132,11 @@ async function cargarFinanzas(mes) {
     S.fin = r;
     S.finMes = r.mes.clave;
     ls.set(K.fin, JSON.stringify(r));
+    S.finError = '';
     if (S.view === 'dinero') render();
   } catch (e) {
+    S.finError = e.message;
+    if (S.view === 'dinero') render();
     toast(e.message, true);
   }
 }
@@ -1158,7 +1161,13 @@ function viewDinero() {
   const f = S.fin;
   let html = topbar('Dinero') + '<main class="screen">';
 
-  if (!f) return html + '<div class="empty"><span class="spinner"></span><p>Cargando finanzas…</p></div></main>';
+  if (!f) {
+    return html + (S.finError
+      ? `<div class="empty"><p>No se pudieron cargar las finanzas:<br><b>${esc(S.finError)}</b></p>
+         ${S.finError.indexOf('no reconocida') !== -1 ? '<p>El servidor (Apps Script) aún tiene la versión anterior. Publique una <b>Nueva versión</b> en Gestionar implementaciones.</p>' : ''}
+         <button type="button" class="btn primary" data-act="reintentarFin">Reintentar</button></div>`
+      : '<div class="empty"><span class="spinner"></span><p>Cargando finanzas…</p></div>') + '</main>';
+  }
 
   if (!f.corte) {
     html += `<div class="card alert"><div class="name">Empiece con un corte</div>
@@ -1452,6 +1461,7 @@ function datosForm() {
 }
 
 Object.assign(ACT, {
+  reintentarFin() { S.finError = ''; render(); cargarFinanzas(); },
   mesCambio(el) {
     const [y, m] = S.finMes.split('-').map(Number);
     const d = new Date(y, m - 1 + Number(el.dataset.d), 1);
