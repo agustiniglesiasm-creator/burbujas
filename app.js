@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 const K = {
   url: 'bur_api',
@@ -13,6 +13,7 @@ const K = {
   draft: 'bur_borrador',
   recents: 'bur_recientes',
   oldUrl: 'bur_app_anterior',
+  fin: 'bur_fin',
 };
 
 const ls = {
@@ -37,6 +38,9 @@ const S = {
   loginError: '',
   cobro: null,
   finalizado: null,
+  fin: null,
+  finMes: '',
+  form: null,
 };
 
 // -----------------------------------------------------------------------------
@@ -219,6 +223,8 @@ async function sync(full) {
 function cerrarSesionLocal() {
   ls.del(K.token);
   ls.del(K.cache);
+  ls.del(K.fin);
+  S.fin = null;
   S.data = null;
   S.pin = '';
   cerrarHoja();
@@ -232,12 +238,15 @@ const ICONOS = {
   hoy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>',
   nueva: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   clientes: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.8c1.8.8 3 2.6 3.5 5.2"/></svg>',
+  dinero: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M2.5 10h19"/><circle cx="16.5" cy="14.5" r="1.3" fill="currentColor"/></svg>',
   mas: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>',
 };
 
 function viewNav() {
-  const items = [['hoy', 'Hoy'], ['nueva', 'Nueva'], ['clientes', 'Clientes'], ['mas', 'Más']];
-  return '<nav class="nav">' + items.map(([v, label]) => {
+  const items = esGerencia()
+    ? [['hoy', 'Hoy'], ['clientes', 'Clientes'], ['nueva', 'Nueva'], ['dinero', 'Dinero'], ['mas', 'Más']]
+    : [['hoy', 'Hoy'], ['nueva', 'Nueva'], ['clientes', 'Clientes'], ['mas', 'Más']];
+  return `<nav class="nav" style="grid-template-columns:repeat(${items.length},1fr)">` + items.map(([v, label]) => {
     const ico = v === 'nueva' ? '<span class="ico">' + ICONOS[v] + '</span>' : ICONOS[v];
     return `<button type="button" class="${S.view === v ? 'on' : ''} ${v === 'nueva' ? 'new' : ''}" data-act="nav" data-v="${v}">${ico}<span>${label}</span></button>`;
   }).join('') + '</nav>';
@@ -280,6 +289,7 @@ function cerrarHoja() {
   document.getElementById('sheet').hidden = true;
   document.getElementById('sheet-backdrop').hidden = true;
   S.cobro = null;
+  S.form = null;
 }
 
 async function conEspera(el, fn) {
@@ -314,7 +324,7 @@ function render() {
     return;
   }
 
-  const views = { hoy: viewHoy, nueva: viewNueva, clientes: viewClientes, mas: viewMas };
+  const views = { hoy: viewHoy, nueva: viewNueva, clientes: viewClientes, dinero: viewDinero, mas: viewMas };
   app.innerHTML = (views[S.view] || viewHoy)() + viewNav();
 }
 
@@ -372,7 +382,7 @@ function viewHoy() {
     const c = d.caja;
     html += `<div class="kpis">
       <div class="kpi wide"><div class="label">Cobrado hoy</div><div class="value">${usd(c.cobradoUsd)}</div>
-        <div class="hint">${bs(c.pagoMovilBs)} pago móvil · ${usd(c.efectivoUsd)} efectivo · ${c.cobros} cobro(s)</div></div>
+        <div class="hint">${bs(c.pagoMovilBs)} pago móvil · ${usd(c.efectivoUsd)} efectivo · ${c.cobros} cobro(s)${c.egresosUsd ? ' · gastos ' + usd(c.egresosUsd) : ''}</div></div>
       <div class="kpi"><div class="label">Órdenes hoy</div><div class="value">${c.ordenesHoy}</div></div>
       <div class="kpi"><div class="label">Por cobrar</div><div class="value">${usd(porCobrar)}</div><div class="hint">${pendientes.length} cotización(es)</div></div>
     </div>`;
@@ -716,6 +726,7 @@ function viewMas() {
     <button type="button" class="list-item" data-act="appAnterior"><span>${old ? 'Cambiar enlace de la app anterior' : 'Enlazar la app anterior (finanzas)'}</span><span class="meta">›</span></button>
     ${esDueno() ? '<button type="button" class="list-item" data-act="usuarios"><span>Usuarios y teléfonos</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="cambiarPin"><span>Cambiar mi PIN</span><span class="meta">›</span></button>
+    ${esDueno() ? '<button type="button" class="list-item" data-act="completarTasas"><span>Calcular tasas del historial</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="refrescarTodo"><span>Recargar todos los datos</span><span class="meta">↻</span></button>
     <button type="button" class="list-item" data-act="logout"><span style="color:var(--danger)">Cerrar sesión en este teléfono</span><span></span></button>
     <p class="note" style="text-align:center">Burbujas app ${APP_VERSION}</p></main>`;
@@ -753,7 +764,12 @@ async function hojaUsuarios(data) {
 // -----------------------------------------------------------------------------
 
 const ACT = {
-  nav(el) { S.view = el.dataset.v; render(); window.scrollTo(0, 0); },
+  nav(el) {
+    S.view = el.dataset.v;
+    render();
+    window.scrollTo(0, 0);
+    if (S.view === 'dinero') cargarFinanzas();
+  },
   cerrarHoja() { cerrarHoja(); },
   refrescar() { sync(Date.now() - S.lastFull > 10 * 60000); },
   refrescarTodo() { sync(true).then(() => toast('Datos actualizados')); },
@@ -1107,12 +1123,443 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // -----------------------------------------------------------------------------
+// DINERO (etapa 2): corte, saldos, gastos, empleados y resumen del mes
+// -----------------------------------------------------------------------------
+
+async function cargarFinanzas(mes) {
+  try {
+    const r = await api('finanzas', { mes: mes || S.finMes });
+    S.fin = r;
+    S.finMes = r.mes.clave;
+    ls.set(K.fin, JSON.stringify(r));
+    if (S.view === 'dinero') render();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function aplicarFinanzas(r) {
+  S.fin = r;
+  S.finMes = r.mes.clave;
+  ls.set(K.fin, JSON.stringify(r));
+  if (S.view === 'dinero') render();
+  sync(false); // actualizar también la caja de Hoy
+}
+
+function empleadoFin(id) {
+  return ((S.fin && S.fin.empleados) || []).find((e) => String(e.ID) === String(id));
+}
+
+function fechaDia(clave) {
+  return fechaCorta(clave + 'T12:00:00');
+}
+
+function viewDinero() {
+  const f = S.fin;
+  let html = topbar('Dinero') + '<main class="screen">';
+
+  if (!f) return html + '<div class="empty"><span class="spinner"></span><p>Cargando finanzas…</p></div></main>';
+
+  if (!f.corte) {
+    html += `<div class="card alert"><div class="name">Empiece con un corte</div>
+      <div class="meta">Anote lo que tiene hoy en el banco y en efectivo. Desde esa fecha la app calcula sus saldos.</div>
+      <div class="actions">${esDueno() ? '<button type="button" class="btn primary" data-act="hojaCorte">Hacer el corte</button>' : '<span class="meta">Solo el dueño puede hacer el corte.</span>'}</div></div>`;
+  } else {
+    const s = f.saldos;
+    html += `<div class="kpis">
+      <div class="kpi"><div class="label">Banco</div><div class="value" style="font-size:19px">${bs(s.bancoBs)}</div>
+        <div class="hint">${f.tasaHoy ? '≈ ' + usd(s.bancoBs / f.tasaHoy) : ''}</div></div>
+      <div class="kpi"><div class="label">Efectivo</div><div class="value">${usd(s.efectivoUsd)}</div></div>
+      <div class="kpi wide"><div class="card-row"><div><div class="label">Total disponible</div><div class="value">≈ ${usd(s.totalUsd)}</div>
+        <div class="hint">Desde el corte del ${fechaDia(f.corte.fecha)}</div></div>
+        ${esDueno() ? '<button type="button" class="btn small ghost" data-act="hojaCorte">Rehacer corte</button>' : ''}</div></div>
+    </div>`;
+  }
+
+  html += `<div class="row2 mt">
+    <button type="button" class="btn primary" data-act="hojaGasto">+ Gasto</button>
+    <button type="button" class="btn" data-act="hojaEmpleados">Empleados</button></div>`;
+
+  const m = f.mes;
+  const esMesActual = m.clave >= f.hoy.slice(0, 7);
+  html += `<div class="month-nav"><button type="button" class="btn small" data-act="mesCambio" data-d="-1" aria-label="Mes anterior">‹</button>
+    <b>${esc(m.texto.charAt(0).toUpperCase() + m.texto.slice(1))}</b>
+    <button type="button" class="btn small" data-act="mesCambio" data-d="1" ${esMesActual ? 'disabled' : ''} aria-label="Mes siguiente">›</button></div>`;
+
+  html += `<div class="kpis">
+    <div class="kpi"><div class="label">Ventas</div><div class="value">${usd(m.ventasUsd)}</div><div class="hint">${m.cobros} cobro(s)</div></div>
+    <div class="kpi"><div class="label">Gastos</div><div class="value">${usd(m.gastosUsd)}</div></div>
+    <div class="kpi wide"><div class="label">Ganancia (ventas − gastos)</div>
+      <div class="value" style="color:var(${m.gananciaUsd >= 0 ? '--ok' : '--danger'})">${usd(m.gananciaUsd)}</div>
+      ${m.retirosUsd ? `<div class="hint">Retiros de socio: ${usd(m.retirosUsd)} (no se restan de la ganancia)</div>` : ''}</div>
+  </div>`;
+
+  if (m.gastos === 'parcial') html += `<p class="note warn">Gastos registrados desde el corte (${fechaDia(f.corte.fecha)}). Los de días anteriores de este mes pueden faltar.</p>`;
+  if (m.gastos === 'incompleto') html += '<p class="note warn">' + (f.corte ? 'Mes anterior al corte' : 'Todavía no hay corte') + ': los gastos pueden estar incompletos, así que la ganancia no es exacta. Las ventas sí son completas.</p>';
+
+  if (m.porCategoria.length) {
+    const max = Math.max(...m.porCategoria.map((c) => c.usd)) || 1;
+    html += '<h2 class="section">Gastos por categoría</h2>' + m.porCategoria.map((c) => `
+      <div class="cat-row"><div class="card-row"><span>${esc(c.categoria)}</span><b>${usd(c.usd)}</b></div>
+      <div class="bar"><span style="width:${Math.round((c.usd / max) * 100)}%"></span></div></div>`).join('');
+  }
+
+  if (f.historial.length > 1) {
+    html += '<h2 class="section">Últimos meses</h2><div class="card" style="padding:6px 12px">' + f.historial.map((h) => `
+      <div class="hist-row"><span>${esc(h.texto)}</span><span>${usd(h.ventasUsd)}</span><span>${usd(h.gastosUsd)}${h.gastos === 'completo' ? '' : '*'}</span>
+      <b style="color:var(${h.gananciaUsd >= 0 ? '--ok' : '--danger'})">${usd(h.gananciaUsd)}</b></div>`).join('') +
+      '<div class="hist-row meta"><span></span><span>ventas</span><span>gastos</span><span>ganancia</span></div></div>' +
+      (f.historial.some((h) => h.gastos !== 'completo') ? '<p class="note">* gastos incompletos (antes del corte)</p>' : '');
+  }
+
+  html += `<h2 class="section">Movimientos${f.corte ? ' desde el corte' : ''}</h2>`;
+  html += f.movimientos.length ? f.movimientos.map((x) => {
+    const entra = x.EquivalenteUSD > 0 || (x.Tipo === 'AJUSTE_SALDO' && x.EquivalenteUSD >= 0);
+    const signo = x.Tipo === 'AJUSTE_PRESTAMO' ? '±' : (entra ? '+' : '−');
+    const principal = x.Moneda === 'VES' ? bs(x.Monto) : usd(x.Monto);
+    return `<button type="button" class="list-item" data-act="hojaMovimiento" data-id="${x.ID}">
+      <div><div style="font-weight:600">${esc(x.Categoria)}${x.Persona ? ' · ' + esc(x.Persona) : ''}</div>
+      <div class="meta">${fechaDia(x.Fecha)} · ${esc(x.Medio)}</div></div>
+      <div class="amount" style="font-size:15px;color:var(${signo === '+' ? '--ok' : '--text'})">${signo} ${principal}
+      ${x.Moneda === 'VES' && x.EquivalenteUSD ? `<small>≈ ${usd(Math.abs(x.EquivalenteUSD))}</small>` : ''}</div></button>`;
+  }).join('') : '<div class="empty">Sin movimientos todavía.</div>';
+
+  return html + '</main>';
+}
+
+// Formularios de dinero: el estado vive en S.form y se redibuja con pintarForm().
+
+function nuevoForm(hoja, extra) {
+  const t = (S.fin && S.fin.tasaHoy) || tasaHoy();
+  S.form = Object.assign({
+    hoja,
+    fecha: hoyISO(),
+    tasa: t ? String(Math.round(t * 10000) / 10000).replace('.', ',') : '',
+    moneda: 'VES',
+  }, extra);
+  pintarForm();
+}
+
+function campo(label, k, extra) {
+  const v = S.form[k] == null ? '' : S.form[k];
+  return `<label class="field">${label}<input class="input" data-in="f" data-k="${k}" value="${esc(v)}" ${extra || 'inputmode="decimal"'}></label>`;
+}
+
+function monedaHTML() {
+  return `<div class="segmented two">
+    <button type="button" class="${S.form.moneda === 'VES' ? 'on' : ''}" data-act="fMoneda" data-m="VES">Bs (banco)</button>
+    <button type="button" class="${S.form.moneda === 'USD' ? 'on' : ''}" data-act="fMoneda" data-m="USD">$ efectivo</button></div>`;
+}
+
+function fechaTasaHTML() {
+  return `<div class="row2">
+    <label class="field">Fecha<input class="input" type="date" data-ch="fFecha" value="${esc(S.form.fecha)}" max="${esc(hoyISO())}"></label>
+    ${S.form.moneda === 'VES' ? campo('Tasa BCV', 'tasa') : '<span></span>'}</div>`;
+}
+
+function botonesForm(label) {
+  return `<div id="form-eq">${eqFormHTML()}</div>
+    <div class="actions"><button type="button" class="btn primary block" data-act="fGuardar">${label}</button>
+    <button type="button" class="btn ghost block" data-act="${S.form.volver ? 'hojaEmpleados' : 'cerrarHoja'}">${S.form.volver ? 'Volver' : 'Cancelar'}</button></div>`;
+}
+
+function fNum(k) {
+  return parseNum(S.form[k]);
+}
+
+function netoSemana() {
+  const e = empleadoFin(S.form.empleadoId);
+  return r2((fNum('sueldo') || 0) - (e ? e.adelantosUsd : 0) - (fNum('descuento') || 0));
+}
+
+function eqFormHTML() {
+  const f = S.form;
+  const t = fNum('tasa');
+  const enBs = (monto) => (f.moneda === 'VES' && t > 0 ? bs(monto * t) : '');
+
+  if (f.hoja === 'gasto') {
+    return f.moneda === 'VES' && t > 0 && fNum('monto') > 0 ? `<p class="note">≈ ${usd(fNum('monto') / t)}</p>` : '';
+  }
+  if (f.hoja === 'adelanto' || (f.hoja === 'deuda' && f.modo === 'prestar')) {
+    const u = fNum('montoUsd');
+    return u > 0 ? `<p class="note check">${usd(u)}${enBs(u) ? ' = ' + enBs(u) : ''}</p>` : '';
+  }
+  if (f.hoja === 'pagar') {
+    const n = netoSemana();
+    return n < 0
+      ? '<p class="note warn">Los adelantos y el descuento superan el sueldo.</p>'
+      : `<div class="big-amount" style="font-size:24px">A pagar: ${usd(n)}<small>${enBs(n)}</small></div>`;
+  }
+  return '';
+}
+
+function pintarForm() {
+  const fn = HOJAS_FORM[S.form.hoja];
+  if (fn) abrirHoja(fn(S.form));
+}
+
+const HOJAS_FORM = {
+  corte(f) {
+    const empleados = (S.fin && S.fin.empleados) || [];
+    const rehacer = S.fin && S.fin.corte;
+    return `<h3>${rehacer ? 'Rehacer corte' : 'Hacer el corte'}</h3>
+      <div class="sub">Lo que tiene hoy. Desde esta fecha la app calcula los saldos; lo anterior queda como historial.</div>
+      <label class="field">Fecha del corte<input class="input" type="date" data-ch="fFecha" value="${esc(f.fecha)}"></label>
+      ${campo('Saldo en banco (Bs)', 'bancoBs')}
+      ${campo('Efectivo en caja ($)', 'efectivoUsd')}
+      <h2 class="section">Deudas de empleados ($)</h2>
+      ${empleados.map((e) => campo(esc(e.Nombre), 'deuda_' + e.ID)).join('')}
+      <p class="note">Si alguien no debe nada, déjelo vacío.${rehacer ? ' Al rehacer, se reemplazan los saldos del corte anterior.' : ''}</p>
+      ${botonesForm('Guardar corte')}`;
+  },
+  gasto(f) {
+    const empleados = (S.fin && S.fin.empleados) || [];
+    const pill = (k, v) => `<button type="button" class="pill ${f[k] === v ? 'on' : ''}" data-act="fSet" data-k="${k}" data-v="${esc(v)}">${esc(v)}</button>`;
+    return `<h3>Registrar gasto</h3>
+      <div class="pills">${S.fin.categorias.map((c) => pill('categoria', c)).join('')}</div>
+      ${f.categoria === 'Pago empleado' ? `<p class="note">Para sueldos y adelantos es mejor usar <b>Empleados</b>: así se descuentan solos.</p>
+        <div class="pills">${empleados.map((e) => pill('persona', e.Nombre)).join('')}</div>` : ''}
+      ${monedaHTML()}
+      ${campo(f.moneda === 'VES' ? 'Monto (Bs)' : 'Monto ($)', 'monto')}
+      ${fechaTasaHTML()}
+      ${campo('Nota (opcional)', 'notas', 'autocomplete="off"')}
+      ${botonesForm('Guardar gasto')}`;
+  },
+  adelanto(f) {
+    const e = empleadoFin(f.empleadoId);
+    const dia = e.SueldoSemanalUSD / e.DiasSemana;
+    return `<h3>Adelanto a ${esc(e.Nombre)}</h3><div class="sub">1 día = ${usd(dia)} (${usd(e.SueldoSemanalUSD)} ÷ ${e.DiasSemana} días)</div>
+      <div class="pills">${[1, 2].map((n) => `<button type="button" class="pill ${fNum('montoUsd') === r2(dia * n) ? 'on' : ''}" data-act="fSet" data-k="montoUsd" data-v="${fmtIn(dia * n)}">${n} día${n > 1 ? 's' : ''}</button>`).join('')}</div>
+      ${campo('Monto ($)', 'montoUsd')}
+      ${monedaHTML()}
+      ${fechaTasaHTML()}
+      ${botonesForm('Registrar adelanto')}`;
+  },
+  pagar(f) {
+    const e = empleadoFin(f.empleadoId);
+    return `<h3>Pagar semana · ${esc(e.Nombre)}</h3>
+      ${campo('Sueldo de la semana ($)', 'sueldo')}
+      <div class="list-item" style="cursor:default"><span>− Adelantos ya entregados</span><b>${usd(e.adelantosUsd)}</b></div>
+      ${e.deudaUsd > 0 ? campo(`− Descuento de deuda ($) · debe ${usd(e.deudaUsd)}`, 'descuento') : ''}
+      ${monedaHTML()}
+      ${fechaTasaHTML()}
+      ${botonesForm('Confirmar pago')}`;
+  },
+  deuda(f) {
+    const e = empleadoFin(f.empleadoId);
+    return `<h3>Deuda de ${esc(e.Nombre)}</h3><div class="sub">Debe ahora: <b>${usd(e.deudaUsd)}</b></div>
+      <div class="segmented two">
+        <button type="button" class="${f.modo === 'ajustar' ? 'on' : ''}" data-act="fSet" data-k="modo" data-v="ajustar">Corregir monto</button>
+        <button type="button" class="${f.modo === 'prestar' ? 'on' : ''}" data-act="fSet" data-k="modo" data-v="prestar">Prestar dinero</button></div>
+      ${f.modo === 'ajustar'
+        ? campo('Deuda correcta ($)', 'nueva') + '<p class="note">No mueve dinero: solo corrige lo que debe.</p>'
+        : campo('Monto prestado ($)', 'montoUsd') + monedaHTML() + fechaTasaHTML() + '<p class="note">Sale de la caja y se suma a la deuda.</p>'}
+      ${campo('Motivo (opcional)', 'motivo', 'autocomplete="off"')}
+      ${botonesForm('Guardar')}`;
+  },
+  empleado(f) {
+    return `<h3>${f.ID ? 'Editar empleado' : 'Agregar empleado'}</h3>
+      ${campo('Nombre', 'Nombre', 'autocomplete="off"')}
+      <div class="row2">${campo('Sueldo semanal ($)', 'SueldoSemanalUSD')}${campo('Días por semana', 'DiasSemana', 'inputmode="numeric"')}</div>
+      ${campo('Descuento semanal de deuda ($)', 'DescuentoSemanalUSD')}
+      <p class="note">El descuento se propone al pagar la semana; puede cambiarlo cada vez.</p>
+      ${f.ID ? `<label class="field" style="display:flex;align-items:center;gap:10px;font-size:16px;color:var(--text)">
+        <input type="checkbox" data-act="fToggleActivo" ${f.Activo !== false ? 'checked' : ''} style="width:22px;height:22px"> Activo</label>` : ''}
+      ${botonesForm('Guardar')}`;
+  },
+};
+
+function hojaEmpleados() {
+  S.form = null;
+  const lista = (S.fin && S.fin.empleados) || [];
+  abrirHoja(`<h3>Empleados</h3>
+    ${lista.map((e) => `<div class="card">
+      <div class="card-row"><div><div class="name">${esc(e.Nombre)}</div>
+        <div class="meta">${usd(e.SueldoSemanalUSD)}/semana${e.ultimoPago ? ' · último pago ' + fechaDia(e.ultimoPago) : ''}</div></div>
+        ${esDueno() ? `<button type="button" class="btn small ghost" data-act="hojaEmpleado" data-id="${e.ID}">Editar</button>` : ''}</div>
+      <div class="pills">${e.deudaUsd > 0 ? `<span class="badge warn">Debe ${usd(e.deudaUsd)}</span>` : '<span class="badge ok">Sin deuda</span>'}
+        ${e.adelantosUsd > 0 ? `<span class="badge">Adelantos ${usd(e.adelantosUsd)}</span>` : ''}</div>
+      <div class="actions">
+        <button type="button" class="btn" data-act="hojaAdelanto" data-id="${e.ID}">Adelanto</button>
+        <button type="button" class="btn ok" data-act="hojaPagar" data-id="${e.ID}">Pagar semana</button></div>
+      <button type="button" class="btn small block mt" data-act="hojaDeuda" data-id="${e.ID}">Deuda</button>
+    </div>`).join('') || '<div class="empty">Sin empleados.</div>'}
+    ${esDueno() ? '<button type="button" class="btn block" data-act="hojaEmpleado">+ Agregar empleado</button>' : ''}
+    <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+function hojaMovimiento(id) {
+  const x = S.fin.movimientos.find((m) => String(m.ID) === String(id));
+  if (!x) return;
+  const filas = [
+    ['Fecha', fechaDia(x.Fecha)],
+    ['Monto', x.Moneda === 'VES' ? bs(x.Monto) : usd(x.Monto)],
+    ['En dólares', usd(x.EquivalenteUSD)],
+    ['Medio', x.Medio],
+    ['Persona', x.Persona],
+    ['Referencia', x.Referencia],
+    ['Registrado por', x.Usuario],
+  ].filter((r) => r[1]);
+  abrirHoja(`<h3>${esc(x.Categoria)}</h3><div class="sub">${esc(x.Tipo)}</div>
+    <div class="card mt">${filas.map((r) => `<div class="card-row" style="padding:4px 0"><span class="muted">${r[0]}</span><span>${esc(r[1])}</span></div>`).join('')}</div>
+    ${x.Notas ? `<p class="note">📝 ${esc(x.Notas)}</p>` : ''}
+    <div class="actions">
+      ${esDueno() && x.Referencia !== 'CORTE' ? `<button type="button" class="btn danger block" data-act="eliminarMov" data-id="${x.ID}" data-orden="${esc(x.OrdenID)}">Eliminar movimiento</button>` : ''}
+      <button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+const MENSAJES_FIN = {
+  corte: 'Corte guardado ✓',
+  gasto: 'Gasto registrado ✓',
+  adelanto: 'Adelanto registrado ✓',
+  pagarSemana: 'Pago registrado ✓',
+  deuda: 'Deuda actualizada ✓',
+  empleadoGuardar: 'Empleado guardado ✓',
+};
+
+function datosForm() {
+  const f = S.form;
+  const tasa = f.moneda === 'VES' ? fNum('tasa') : '';
+  const base = { fecha: f.fecha, moneda: f.moneda, tasa, mes: S.finMes };
+  const usaTasa = f.moneda === 'VES' && (['gasto', 'adelanto', 'pagar'].includes(f.hoja) || (f.hoja === 'deuda' && f.modo === 'prestar'));
+  if (usaTasa && !(tasa > 0)) throw new Error('Indique la tasa BCV.');
+
+  if (f.hoja === 'corte') {
+    const deudas = {};
+    (S.fin.empleados || []).forEach((e) => { deudas[e.ID] = fNum('deuda_' + e.ID) || 0; });
+    return ['corte', { fecha: f.fecha, bancoBs: fNum('bancoBs') || 0, efectivoUsd: fNum('efectivoUsd') || 0, deudas }];
+  }
+  if (f.hoja === 'gasto') {
+    if (!(fNum('monto') > 0)) throw new Error('Indique el monto.');
+    if (f.categoria === 'Pago empleado' && !f.persona) throw new Error('Elija a qué empleado.');
+    return ['gasto', Object.assign(base, { categoria: f.categoria, monto: fNum('monto'), persona: f.persona, notas: f.notas })];
+  }
+  if (f.hoja === 'adelanto') {
+    if (!(fNum('montoUsd') > 0)) throw new Error('Indique el monto.');
+    return ['adelanto', Object.assign(base, { empleadoId: f.empleadoId, montoUsd: fNum('montoUsd') })];
+  }
+  if (f.hoja === 'pagar') {
+    if (netoSemana() < 0) throw new Error('Los adelantos y el descuento superan el sueldo.');
+    return ['pagarSemana', Object.assign(base, { empleadoId: f.empleadoId, sueldoUsd: fNum('sueldo'), descuentoUsd: fNum('descuento') || 0 })];
+  }
+  if (f.hoja === 'deuda') {
+    return ['deuda', Object.assign(base, { empleadoId: f.empleadoId, modo: f.modo, nuevaDeudaUsd: fNum('nueva'), montoUsd: fNum('montoUsd'), motivo: f.motivo })];
+  }
+  return ['empleadoGuardar', {
+    ID: f.ID, Nombre: f.Nombre, SueldoSemanalUSD: fNum('SueldoSemanalUSD'), DiasSemana: fNum('DiasSemana'),
+    DescuentoSemanalUSD: fNum('DescuentoSemanalUSD') || 0, Activo: f.Activo !== false, mes: S.finMes,
+  }];
+}
+
+Object.assign(ACT, {
+  mesCambio(el) {
+    const [y, m] = S.finMes.split('-').map(Number);
+    const d = new Date(y, m - 1 + Number(el.dataset.d), 1);
+    S.finMes = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    cargarFinanzas(S.finMes);
+  },
+  hojaCorte() {
+    const c = S.fin.corte;
+    const extra = {};
+    if (c) Object.assign(extra, { fecha: c.fecha, bancoBs: c.bancoBs ? fmtIn(c.bancoBs) : '', efectivoUsd: c.efectivoUsd ? fmtIn(c.efectivoUsd) : '' });
+    (S.fin.empleados || []).forEach((e) => { if (c && e.deudaUsd) extra['deuda_' + e.ID] = fmtIn(e.deudaUsd); });
+    nuevoForm('corte', extra);
+  },
+  hojaGasto() { nuevoForm('gasto', { categoria: 'Compra de insumos', monto: '', notas: '', persona: '' }); },
+  hojaEmpleados() { hojaEmpleados(); },
+  hojaAdelanto(el) {
+    const e = empleadoFin(el.dataset.id);
+    nuevoForm('adelanto', { empleadoId: e.ID, montoUsd: fmtIn(e.SueldoSemanalUSD / e.DiasSemana), volver: true });
+  },
+  hojaPagar(el) {
+    const e = empleadoFin(el.dataset.id);
+    nuevoForm('pagar', {
+      empleadoId: e.ID, sueldo: fmtIn(e.SueldoSemanalUSD),
+      descuento: fmtIn(Math.min(e.DescuentoSemanalUSD, e.deudaUsd)), volver: true,
+    });
+  },
+  hojaDeuda(el) {
+    const e = empleadoFin(el.dataset.id);
+    nuevoForm('deuda', { empleadoId: e.ID, modo: 'ajustar', nueva: fmtIn(e.deudaUsd), montoUsd: '', motivo: '', volver: true });
+  },
+  hojaEmpleado(el) {
+    const e = el.dataset.id ? empleadoFin(el.dataset.id) : null;
+    nuevoForm('empleado', e
+      ? { ID: e.ID, Nombre: e.Nombre, SueldoSemanalUSD: fmtIn(e.SueldoSemanalUSD), DiasSemana: String(e.DiasSemana), DescuentoSemanalUSD: fmtIn(e.DescuentoSemanalUSD), Activo: true, volver: true }
+      : { Nombre: '', SueldoSemanalUSD: '60,00', DiasSemana: '6', DescuentoSemanalUSD: '0,00', volver: true });
+  },
+  hojaMovimiento(el) { hojaMovimiento(el.dataset.id); },
+  fSet(el) { S.form[el.dataset.k] = el.dataset.v; pintarForm(); },
+  fMoneda(el) { S.form.moneda = el.dataset.m; pintarForm(); },
+  fToggleActivo(el) { S.form.Activo = el.checked; },
+  async fGuardar(el) {
+    let accion;
+    let datos;
+    try {
+      [accion, datos] = datosForm();
+    } catch (e) {
+      toast(e.message, true);
+      return;
+    }
+    if (accion === 'corte' && !confirm('¿Guardar el corte al ' + fechaDia(datos.fecha) + '?')) return;
+    const volver = S.form.volver;
+    await conEspera(el, async () => {
+      aplicarFinanzas(await api(accion, datos));
+      if (volver) hojaEmpleados(); else cerrarHoja();
+      toast(MENSAJES_FIN[accion]);
+    });
+  },
+  async eliminarMov(el) {
+    const msg = el.dataset.orden
+      ? '¿Eliminar este cobro? La cotización volverá a "Por cobrar".'
+      : '¿Eliminar este movimiento? No se puede deshacer.';
+    if (!confirm(msg)) return;
+    await conEspera(el, async () => {
+      aplicarFinanzas(await api('eliminarMovimiento', { id: el.dataset.id, mes: S.finMes }));
+      cerrarHoja();
+      toast('Movimiento eliminado');
+    });
+  },
+  async completarTasas(el) {
+    if (!confirm('¿Calcular la tasa BCV de los cobros y gastos anteriores? Solo completa lo que falta.')) return;
+    await conEspera(el, async () => {
+      const r = await api('completarTasas', { mes: S.finMes });
+      aplicarFinanzas(r.finanzas);
+      toast('Listo: ' + r.resultado.movimientosCompletados + ' movimientos completados');
+    });
+  },
+});
+
+INP.f = function (el) {
+  S.form[el.dataset.k] = el.value;
+  const eq = document.getElementById('form-eq');
+  if (eq) eq.innerHTML = eqFormHTML();
+};
+
+CH.fFecha = async function (el) {
+  const f = S.form;
+  f.fecha = el.value || hoyISO();
+  if (f.hoja !== 'corte' && f.moneda === 'VES') {
+    try {
+      const r = await api('tasaFecha', { fecha: f.fecha });
+      f.tasa = r && r.tasa ? String(r.tasa).replace('.', ',') : '';
+      if (!f.tasa) toast('No hay tasa guardada para ese día. Escríbala.', true);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+  if (S.form === f) pintarForm();
+};
+
+// -----------------------------------------------------------------------------
 // Inicio
 // -----------------------------------------------------------------------------
 
 (function iniciar() {
   S.data = ls.json(K.cache, null);
   S.draft = Object.assign(borradorVacio(), ls.json(K.draft, {}));
+  S.fin = ls.json(K.fin, null);
+  S.finMes = S.fin ? S.fin.mes.clave : '';
   render();
   if (ls.get(K.url) && ls.get(K.token)) sync(true);
   if ('serviceWorker' in navigator && location.protocol === 'https:') {

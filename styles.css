@@ -262,3 +262,14 @@ textarea.input { min-height: 72px; resize: vertical; }
 .history .list-item { cursor: default; }
 .muted { color: var(--muted); }
 .mt { margin-top: 14px; }
+
+/* Dinero */
+.segmented.two { grid-template-columns: 1fr 1fr; }
+.month-nav { display: flex; align-items: center; justify-content: space-between; margin: 22px 0 10px; }
+.month-nav b { font-size: 16px; }
+.cat-row { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px; font-size: 14px; }
+.bar { height: 6px; border-radius: 3px; background: var(--surface-2); margin-top: 8px; overflow: hidden; }
+.bar span { display: block; height: 100%; background: var(--brand); border-radius: 3px; }
+.hist-row { display: grid; grid-template-columns: 1.1fr 1fr 1fr 1fr; gap: 6px; padding: 8px 0; font-size: 14px; border-bottom: 1px solid var(--border); text-align: right; }
+.hist-row > :first-child { text-align: left; text-transform: capitalize; }
+.hist-row:last-child { border-bottom: 0; font-size: 12px; }
