@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 const K = {
   url: 'bur_api',
@@ -1291,6 +1291,7 @@ function nuevoForm(hoja, extra) {
     fecha: hoyISO(),
     tasa: t ? String(Math.round(t * 10000) / 10000).replace('.', ',') : '',
     moneda: 'VES',
+    comision: true,
   }, extra);
   pintarForm();
 }
@@ -1318,6 +1319,36 @@ function botonesForm(label) {
     <button type="button" class="btn ghost block" data-act="${S.form.volver ? 'hojaEmpleados' : 'cerrarHoja'}">${S.form.volver ? 'Volver' : 'Cancelar'}</button></div>`;
 }
 
+/** ¿Este formulario es una salida por pago móvil que paga comisión? */
+function comisionAplica() {
+  const f = S.form;
+  if (f.moneda !== 'VES') return false;
+  if (f.hoja === 'gasto') return f.categoria !== 'Comisión bancaria';
+  return f.hoja === 'adelanto' || f.hoja === 'pagar' || (f.hoja === 'deuda' && f.modo === 'prestar');
+}
+
+function pctComision() {
+  return S.fin && S.fin.comisionPct != null ? Number(S.fin.comisionPct) : 0.3;
+}
+
+/** Bs que salen por pago móvil en el formulario actual (para calcular la comisión). */
+function bsSalientes() {
+  const f = S.form;
+  const t = fNum('tasa');
+  if (f.hoja === 'gasto') return fNum('monto') || 0;
+  if (fNum('montoBs') > 0) return fNum('montoBs');
+  if (!(t > 0)) return 0;
+  if (f.hoja === 'pagar') return Math.max(0, netoSemana()) * t;
+  return (fNum('montoUsd') || 0) * t;
+}
+
+function comisionHTML() {
+  if (!comisionAplica()) return '';
+  const pct = String(pctComision()).replace('.', ',');
+  return `<label class="field" style="display:flex;align-items:center;gap:10px;font-size:15px;color:var(--text)">
+    <input type="checkbox" data-act="fComision" ${S.form.comision !== false ? 'checked' : ''} style="width:22px;height:22px"> Sumar comisión del banco (${pct}%)</label>`;
+}
+
 function campoBsRedondeo() {
   if (S.form.moneda !== 'VES') return '';
   return campo('Bs que entrega (opcional, para redondear)', 'montoBs', 'inputmode="decimal" placeholder="Ej. 52000"') +
@@ -1334,6 +1365,13 @@ function netoSemana() {
 }
 
 function eqFormHTML() {
+  const base = eqFormBaseHTML();
+  if (!comisionAplica() || S.form.comision === false) return base;
+  const com = r2(bsSalientes() * pctComision() / 100);
+  return com > 0 ? base + `<p class="note">+ comisión del banco: ${bs(com)}</p>` : base;
+}
+
+function eqFormBaseHTML() {
   const f = S.form;
   const t = fNum('tasa');
   const enBs = (monto) => (f.moneda === 'VES' && t > 0 ? bs(monto * t) : '');
@@ -1400,6 +1438,7 @@ const HOJAS_FORM = {
       ${campo(f.moneda === 'VES' ? 'Monto (Bs)' : 'Monto ($)', 'monto')}
       ${fechaTasaHTML()}
       ${campo('Nota (opcional)', 'notas', 'autocomplete="off"')}
+      ${comisionHTML()}
       ${botonesForm('Guardar gasto')}`;
   },
   adelanto(f) {
@@ -1411,6 +1450,7 @@ const HOJAS_FORM = {
       ${monedaHTML()}
       ${fechaTasaHTML()}
       ${campoBsRedondeo()}
+      ${comisionHTML()}
       ${botonesForm('Registrar adelanto')}`;
   },
   pagar(f) {
@@ -1422,6 +1462,7 @@ const HOJAS_FORM = {
       ${monedaHTML()}
       ${fechaTasaHTML()}
       ${campoBsRedondeo()}
+      ${comisionHTML()}
       ${botonesForm('Confirmar pago')}`;
   },
   deuda(f) {
@@ -1434,6 +1475,7 @@ const HOJAS_FORM = {
         ? campo('Deuda correcta ($)', 'nueva') + '<p class="note">No mueve dinero: solo corrige lo que debe.</p>'
         : campo('Monto prestado ($)', 'montoUsd') + monedaHTML() + fechaTasaHTML() + '<p class="note">Sale de la caja y se suma a la deuda.</p>'}
       ${campo('Motivo (opcional)', 'motivo', 'autocomplete="off"')}
+      ${comisionHTML()}
       ${botonesForm('Guardar')}`;
   },
   empleado(f) {
@@ -1505,7 +1547,7 @@ const MENSAJES_FIN = {
 function datosForm() {
   const f = S.form;
   const tasa = f.moneda === 'VES' ? fNum('tasa') : '';
-  const base = { fecha: f.fecha, moneda: f.moneda, tasa, mes: S.finMes };
+  const base = { fecha: f.fecha, moneda: f.moneda, tasa, mes: S.finMes, comision: comisionAplica() && f.comision !== false };
   const usaTasa = f.moneda === 'VES' && (['gasto', 'adelanto', 'pagar', 'movimiento'].includes(f.hoja) || (f.hoja === 'deuda' && f.modo === 'prestar'));
   if (usaTasa && !(tasa > 0)) throw new Error('Indique la tasa BCV.');
 
@@ -1591,6 +1633,11 @@ Object.assign(ACT, {
   fSet(el) { S.form[el.dataset.k] = el.dataset.v; pintarForm(); },
   fMoneda(el) { S.form.moneda = el.dataset.m; pintarForm(); },
   fToggleActivo(el) { S.form.Activo = el.checked; },
+  fComision(el) {
+    S.form.comision = el.checked;
+    const eq = document.getElementById('form-eq');
+    if (eq) eq.innerHTML = eqFormHTML();
+  },
   async fGuardar(el) {
     let accion;
     let datos;
