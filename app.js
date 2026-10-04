@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 
 const K = {
   url: 'bur_api',
@@ -43,6 +43,7 @@ const S = {
   form: null,
   cobFiltro: '',
   cobroMulti: null,
+  edit: null,
 };
 
 // -----------------------------------------------------------------------------
@@ -59,6 +60,8 @@ function parseNum(value) {
   let s = String(value || '').trim().replace(/\s/g, '');
   if (!s) return 0;
   if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  // "52.000" o "1.250.000" sin coma: los puntos separan miles (formato venezolano).
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
   const n = Number(s);
   return isFinite(n) ? n : NaN;
 }
@@ -196,10 +199,19 @@ function guardarCache() {
   if (S.data) ls.set(K.cache, JSON.stringify(S.data));
 }
 
+/** Saldo de cada cotización pendiente: total menos lo ya abonado. */
+function normalizarPendientes(d) {
+  ((d && d.pendientes) || []).forEach((o) => {
+    o.AbonadoUSD = o.AbonadoUSD || 0;
+    o.SaldoUSD = r2((o.TotalUSD || 0) - o.AbonadoUSD);
+  });
+}
+
 function aplicarEstado(estado) {
   if (!estado || !S.data) return;
   S.data.enProceso = estado.enProceso;
   S.data.pendientes = estado.pendientes;
+  normalizarPendientes(S.data);
   S.data.hoy = estado.hoy;
   if (estado.caja) S.data.caja = estado.caja;
   guardarCache();
@@ -214,6 +226,7 @@ async function sync(full) {
   try {
     if (full || !S.data) {
       S.data = await api('bootstrap');
+      normalizarPendientes(S.data);
       S.lastFull = Date.now();
       guardarCache();
     } else {
@@ -303,6 +316,7 @@ function cerrarHoja() {
   S.cobro = null;
   S.form = null;
   S.cobroMulti = null;
+  S.edit = null;
 }
 
 async function conEspera(el, fn) {
@@ -387,7 +401,7 @@ function viewHoy() {
   const fecha = new Date().toLocaleDateString('es-VE', { weekday: 'long', day: 'numeric', month: 'long' });
   const enProceso = (d.enProceso || []).slice().sort((a, b) => new Date(a.FechaCreacion) - new Date(b.FechaCreacion));
   const pendientes = (d.pendientes || []).slice().sort((a, b) => new Date(b.FechaCierre) - new Date(a.FechaCierre));
-  const porCobrar = pendientes.reduce((s, o) => s + (o.TotalUSD || 0), 0);
+  const porCobrar = pendientes.reduce((s, o) => s + (o.SaldoUSD || 0), 0);
 
   let html = topbar('Hoy', fecha.charAt(0).toUpperCase() + fecha.slice(1)) + '<main class="screen">';
 
@@ -426,8 +440,9 @@ function viewHoy() {
     <article class="card ${vieja ? 'alert' : ''}">
       <div class="card-row">
         <div><div class="name">${esc(o.ClienteNombre)}</div>
-          <div class="meta"><span class="badge">${esc(o.Numero)}</span> <span class="badge ${vieja ? 'warn' : ''}">${dias === 0 ? 'hoy' : hace(o.FechaCierre)}</span></div></div>
-        <div class="amount">${usd(o.TotalUSD)}<small>${totalBsTexto(o.TotalUSD)}</small></div>
+          <div class="meta"><span class="badge">${esc(o.Numero)}</span> <span class="badge ${vieja ? 'warn' : ''}">${dias === 0 ? 'hoy' : hace(o.FechaCierre)}</span>
+            ${o.AbonadoUSD ? `<span class="badge ok">abonó ${usd(o.AbonadoUSD)}</span>` : ''}</div></div>
+        <div class="amount">${usd(o.SaldoUSD)}<small>${totalBsTexto(o.SaldoUSD)}</small></div>
       </div>
       <div class="services">${serviciosTexto(o)}</div>
       <div class="actions">
@@ -451,8 +466,9 @@ function textoRecordatorio(o) {
   const t = tasaHoy();
   return '¡Hola, Sr(a). ' + (c ? c.Nombre : o.ClienteNombre).trim() + '! Le saludamos de Autolavado Burbujas.\n' +
     'Le recordamos que tiene pendiente la cotización ' + o.Numero + ' del ' + fechaCorta(o.FechaCierre) +
-    ' por $' + r2(o.TotalUSD).toFixed(2) +
-    (t ? ' (' + r2(o.TotalUSD * t).toFixed(2) + ' Bs a la tasa BCV de hoy: ' + t.toFixed(2) + ')' : '') + '.\n\n' +
+    (o.AbonadoUSD ? ' por $' + r2(o.TotalUSD).toFixed(2) + ', de la cual ya abonó $' + r2(o.AbonadoUSD).toFixed(2) + '. Saldo pendiente: $' : ' por $') +
+    r2(o.SaldoUSD).toFixed(2) +
+    (t ? ' (' + r2(o.SaldoUSD * t).toFixed(2) + ' Bs a la tasa BCV de hoy: ' + t.toFixed(2) + ')' : '') + '.\n\n' +
     '💳 Datos para Pago Móvil:\n* Banco: ' + cfg.Banco + '\n* Teléfono: ' + cfg.Telefono_Pago_Movil +
     '\n* RIF/Cédula: ' + cfg.Cedula_RIF + '\n\n¡Muchas gracias por su preferencia!';
 }
@@ -466,7 +482,7 @@ function abrirCobro(id) {
   if (!o) return;
   const tasa = tasaHoy();
   S.cobro = {
-    id: o.ID, numero: o.Numero, cliente: o.ClienteNombre, total: o.TotalUSD,
+    id: o.ID, numero: o.Numero, cliente: o.ClienteNombre, total: o.SaldoUSD, totalOrig: o.TotalUSD, abonado: o.AbonadoUSD || 0, parcial: false,
     fecha: hoyISO(), tasa: tasa ? String(tasa).replace('.', ',') : '', modo: 'pm', bs: '', usd: '', ref: '',
     codigo: nuevoCodigo(),
   };
@@ -500,7 +516,8 @@ function chequeoCobroHTML() {
   const { b, eq, t } = equivalenteCobro();
   if (c.modo !== 'ef' && !t) return '<p class="note warn">Escriba la tasa BCV del día del pago para calcular los bolívares.</p>';
   const diff = r2(eq - c.total);
-  if (Math.abs(diff) <= 0.10 && eq > 0) return `<p class="note check">✓ Equivale a ${usd(eq)}</p>`;
+  if (Math.abs(diff) <= 0.10 && eq > 0) return `<p class="note check">✓ Equivale a ${usd(eq)}${c.parcial ? ' · paga todo lo que debe' : ''}</p>`;
+  if (c.parcial && eq > 0 && diff < 0) return `<p class="note check">Abona ${usd(eq)} · quedará debiendo ${usd(-diff)}</p>`;
   return `<p class="note warn">Equivale a ${usd(eq)} · ${diff < 0 ? 'faltan' : 'sobran'} ${usd(Math.abs(diff))}</p>`;
 }
 
@@ -514,12 +531,15 @@ function pintarCobro() {
   abrirHoja(`
     <h3>Cobrar ${esc(c.numero)}</h3><div class="sub">${esc(c.cliente)}</div>
     <div class="big-amount">${usd(c.total)}<small>${t ? bs(c.total * t) : ''}</small></div>
+    ${c.abonado ? `<p class="note">Total ${usd(c.totalOrig)} · ya abonó ${usd(c.abonado)} · debe ${usd(c.total)}</p>` : ''}
     <div class="segmented">
       <button type="button" class="${c.modo === 'pm' ? 'on' : ''}" data-act="cobroModo" data-m="pm">Pago móvil</button>
       <button type="button" class="${c.modo === 'ef' ? 'on' : ''}" data-act="cobroModo" data-m="ef">Efectivo $</button>
       <button type="button" class="${c.modo === 'mx' ? 'on' : ''}" data-act="cobroModo" data-m="mx">Mixto</button>
     </div>
     ${campos}
+    <label class="field" style="display:flex;align-items:center;gap:10px;font-size:15px;color:var(--text)">
+      <input type="checkbox" data-act="cobroParcial" ${c.parcial ? 'checked' : ''} style="width:22px;height:22px"> Es un abono (paga solo una parte)</label>
     <div id="cobro-check">${chequeoCobroHTML()}</div>
     <div class="row2">
       <label class="field">Fecha del pago<input class="input" type="date" data-ch="cobroFecha" value="${esc(c.fecha)}" max="${esc(hoyISO())}"></label>
@@ -844,7 +864,8 @@ const ACT = {
   menuOrden(el) {
     const o = buscarOrden(el.dataset.id);
     abrirHoja(`<h3>${esc(o.ClienteNombre)}</h3><div class="sub">${vehiculoTexto(o)}</div>
-      <div class="actions"><button type="button" class="btn danger block" data-act="cancelarOrden" data-id="${o.ID}">Cancelar esta orden</button>
+      <div class="actions"><button type="button" class="btn block" data-act="editarOrden" data-id="${o.ID}">Editar servicios y precios</button>
+      <button type="button" class="btn danger block" data-act="cancelarOrden" data-id="${o.ID}">Cancelar esta orden</button>
       <button type="button" class="btn ghost block" data-act="cerrarHoja">Volver</button></div>`);
   },
   async cancelarOrden(el) {
@@ -859,8 +880,9 @@ const ACT = {
     const o = buscarOrden(el.dataset.id);
     const c = clientePorId(o.ClienteID);
     const tel = c ? telWa(c.Telefono) : '';
-    abrirHoja(`<h3>${esc(o.Numero)} · ${esc(o.ClienteNombre)}</h3><div class="sub">${usd(o.TotalUSD)} · ${hace(o.FechaCierre)}</div>
+    abrirHoja(`<h3>${esc(o.Numero)} · ${esc(o.ClienteNombre)}</h3><div class="sub">${usd(o.SaldoUSD)} · ${hace(o.FechaCierre)}</div>
       <div class="actions">
+        <button type="button" class="btn block" data-act="editarOrden" data-id="${o.ID}">Editar precios o cortesía</button>
         <a class="btn wa block" href="${waLink(tel, textoRecordatorio(o))}" target="_blank" rel="noopener" data-act="recordado" data-ids="${o.ID}">Recordar pago por WhatsApp</a>
         ${esGerencia() ? `<button type="button" class="btn danger block" data-act="eliminarCotizacion" data-id="${o.ID}">Eliminar cotización</button>` : ''}
         <button type="button" class="btn ghost block" data-act="cerrarHoja">Volver</button></div>`);
@@ -877,7 +899,7 @@ const ACT = {
     navigator.clipboard.writeText(r.texto).then(() => toast('Mensaje copiado'), () => toast('No se pudo copiar', true));
   },
   cobrarFinalizado() {
-    const o = (S.data.pendientes || []).find((p) => p.Numero === S.finalizado.numero);
+    const o = (S.data.pendientes || []).find((p) => p.Numero === S.finalizado.numero && p.SaldoUSD > 0);
     if (o) abrirCobro(o.ID); else cerrarHoja();
   },
 
@@ -888,12 +910,14 @@ const ACT = {
     const { u, b, eq, t } = equivalenteCobro();
     if (isNaN(u) || isNaN(b)) { toast('Revise los montos.', true); return; }
     if (b > 0 && !t) { toast('Indique la tasa BCV.', true); return; }
-    if (Math.abs(r2(eq - c.total)) > 0.10) { toast('El monto no coincide con el total de la cotización.', true); return; }
+    const diff = r2(eq - c.total);
+    if (!c.parcial && Math.abs(diff) > 0.10) { toast('El monto no coincide con lo que debe. Si paga solo una parte, marque "Es un abono".', true); return; }
+    if (c.parcial && (!(eq > 0) || diff > 0.10)) { toast('El abono debe ser mayor que cero y no superar lo que debe.', true); return; }
     await conEspera(el, async () => {
-      const r = await api('registrarPago', {
-        id: c.id, PagoMovilBs: b, EfectivoUsd: u, Fecha: c.fecha, Tasa: b > 0 ? t : '', Referencia: c.ref,
+      const r = await api('cobrar', {
+        id: c.id, PagoMovilBs: b, EfectivoUsd: u, Fecha: c.fecha, Tasa: b > 0 ? t : '', Referencia: c.ref, parcial: c.parcial,
       }, c.codigo);
-      aplicarEstado(r.estado); cerrarHoja(); render(); toast('Cobro registrado ✓');
+      aplicarEstado(r.estado); cerrarHoja(); render(); toast(r.mensaje || 'Cobro registrado ✓');
     });
   },
 
@@ -1040,8 +1064,8 @@ const ACT = {
   },
 };
 
-function hojaFinalizado(r) {
-  abrirHoja(`<h3>Cotización ${esc(r.numero)} lista</h3>
+function hojaFinalizado(r, titulo) {
+  abrirHoja(`<h3>${esc(titulo || 'Cotización ' + r.numero + ' lista')}</h3>
     <div class="big-amount">${usd(r.totalUsd)}<small>${r.esCortesia ? 'Cortesía' : bs(r.totalBs)}</small></div>
     <div class="actions">
       <a class="btn wa block" href="${waLink(r.telefonoWa, r.texto)}" target="_blank" rel="noopener">Enviar por WhatsApp</a>
@@ -1294,6 +1318,12 @@ function botonesForm(label) {
     <button type="button" class="btn ghost block" data-act="${S.form.volver ? 'hojaEmpleados' : 'cerrarHoja'}">${S.form.volver ? 'Volver' : 'Cancelar'}</button></div>`;
 }
 
+function campoBsRedondeo() {
+  if (S.form.moneda !== 'VES') return '';
+  return campo('Bs que entrega (opcional, para redondear)', 'montoBs', 'inputmode="decimal" placeholder="Ej. 52000"') +
+    '<p class="note">Si lo deja vacío se usa el monto exacto calculado.</p>';
+}
+
 function fNum(k) {
   return parseNum(S.form[k]);
 }
@@ -1310,6 +1340,15 @@ function eqFormHTML() {
 
   if (f.hoja === 'gasto') {
     return f.moneda === 'VES' && t > 0 && fNum('monto') > 0 ? `<p class="note">≈ ${usd(fNum('monto') / t)}</p>` : '';
+  }
+  const redondeo = f.moneda === 'VES' && t > 0 && fNum('montoBs') > 0
+    ? `<p class="note check">Entrega ${bs(fNum('montoBs'))} (≈ ${usd(fNum('montoBs') / t)})</p>` : '';
+  if (f.hoja === 'movimiento') {
+    return f.moneda === 'VES' && t > 0 && fNum('monto') > 0 ? `<p class="note">≈ ${usd(fNum('monto') / t)}</p>` : '';
+  }
+  if (f.hoja === 'adelanto' && redondeo) return redondeo;
+  if (f.hoja === 'pagar' && redondeo && netoSemana() >= 0) {
+    return `<div class="big-amount" style="font-size:24px">A pagar: ${usd(netoSemana())}</div>` + redondeo;
   }
   if (f.hoja === 'adelanto' || (f.hoja === 'deuda' && f.modo === 'prestar')) {
     const u = fNum('montoUsd');
@@ -1330,6 +1369,13 @@ function pintarForm() {
 }
 
 const HOJAS_FORM = {
+  movimiento(f) {
+    return `<h3>Editar movimiento</h3><div class="sub">${esc(f.titulo)}</div>
+      ${campo(f.moneda === 'VES' ? 'Monto (Bs)' : 'Monto ($)', 'monto')}
+      ${fechaTasaHTML()}
+      ${campo('Nota', 'notas', 'autocomplete="off"')}
+      ${botonesForm('Guardar cambios')}`;
+  },
   corte(f) {
     const empleados = (S.fin && S.fin.empleados) || [];
     const rehacer = S.fin && S.fin.corte;
@@ -1364,6 +1410,7 @@ const HOJAS_FORM = {
       ${campo('Monto ($)', 'montoUsd')}
       ${monedaHTML()}
       ${fechaTasaHTML()}
+      ${campoBsRedondeo()}
       ${botonesForm('Registrar adelanto')}`;
   },
   pagar(f) {
@@ -1374,6 +1421,7 @@ const HOJAS_FORM = {
       ${e.deudaUsd > 0 ? campo(`− Descuento de deuda ($) · debe ${usd(e.deudaUsd)}`, 'descuento') : ''}
       ${monedaHTML()}
       ${fechaTasaHTML()}
+      ${campoBsRedondeo()}
       ${botonesForm('Confirmar pago')}`;
   },
   deuda(f) {
@@ -1419,6 +1467,10 @@ function hojaEmpleados() {
     <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
 }
 
+function movimientoEditable(x) {
+  return x.Referencia !== 'CORTE' && x.Referencia.indexOf('DESC-') !== 0 && x.Tipo !== 'CAMBIO_MONEDA' && !x.OrdenID && !x.CuentaCobrarID;
+}
+
 function hojaMovimiento(id) {
   const x = S.fin.movimientos.find((m) => String(m.ID) === String(id));
   if (!x) return;
@@ -1435,6 +1487,7 @@ function hojaMovimiento(id) {
     <div class="card mt">${filas.map((r) => `<div class="card-row" style="padding:4px 0"><span class="muted">${r[0]}</span><span>${esc(r[1])}</span></div>`).join('')}</div>
     ${x.Notas ? `<p class="note">📝 ${esc(x.Notas)}</p>` : ''}
     <div class="actions">
+      ${esDueno() && movimientoEditable(x) ? `<button type="button" class="btn block" data-act="editarMov" data-id="${x.ID}">Editar monto, fecha o nota</button>` : ''}
       ${esDueno() && x.Referencia !== 'CORTE' ? `<button type="button" class="btn danger block" data-act="eliminarMov" data-id="${x.ID}" data-orden="${esc(x.OrdenID)}">Eliminar movimiento</button>` : ''}
       <button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
 }
@@ -1446,15 +1499,20 @@ const MENSAJES_FIN = {
   pagarSemana: 'Pago registrado ✓',
   deuda: 'Deuda actualizada ✓',
   empleadoGuardar: 'Empleado guardado ✓',
+  editarMovimiento: 'Movimiento actualizado ✓',
 };
 
 function datosForm() {
   const f = S.form;
   const tasa = f.moneda === 'VES' ? fNum('tasa') : '';
   const base = { fecha: f.fecha, moneda: f.moneda, tasa, mes: S.finMes };
-  const usaTasa = f.moneda === 'VES' && (['gasto', 'adelanto', 'pagar'].includes(f.hoja) || (f.hoja === 'deuda' && f.modo === 'prestar'));
+  const usaTasa = f.moneda === 'VES' && (['gasto', 'adelanto', 'pagar', 'movimiento'].includes(f.hoja) || (f.hoja === 'deuda' && f.modo === 'prestar'));
   if (usaTasa && !(tasa > 0)) throw new Error('Indique la tasa BCV.');
 
+  if (f.hoja === 'movimiento') {
+    if (!(fNum('monto') > 0)) throw new Error('Indique el monto.');
+    return ['editarMovimiento', { id: f.movId, monto: fNum('monto'), fecha: f.fecha, tasa, notas: f.notas, mes: S.finMes }];
+  }
   if (f.hoja === 'corte') {
     const deudas = {};
     (S.fin.empleados || []).forEach((e) => { deudas[e.ID] = fNum('deuda_' + e.ID) || 0; });
@@ -1467,11 +1525,11 @@ function datosForm() {
   }
   if (f.hoja === 'adelanto') {
     if (!(fNum('montoUsd') > 0)) throw new Error('Indique el monto.');
-    return ['adelanto', Object.assign(base, { empleadoId: f.empleadoId, montoUsd: fNum('montoUsd') })];
+    return ['adelanto', Object.assign(base, { empleadoId: f.empleadoId, montoUsd: fNum('montoUsd'), montoBs: f.moneda === 'VES' ? fNum('montoBs') || 0 : 0 })];
   }
   if (f.hoja === 'pagar') {
     if (netoSemana() < 0) throw new Error('Los adelantos y el descuento superan el sueldo.');
-    return ['pagarSemana', Object.assign(base, { empleadoId: f.empleadoId, sueldoUsd: fNum('sueldo'), descuentoUsd: fNum('descuento') || 0 })];
+    return ['pagarSemana', Object.assign(base, { empleadoId: f.empleadoId, sueldoUsd: fNum('sueldo'), descuentoUsd: fNum('descuento') || 0, montoBs: f.moneda === 'VES' ? fNum('montoBs') || 0 : 0 })];
   }
   if (f.hoja === 'deuda') {
     return ['deuda', Object.assign(base, { empleadoId: f.empleadoId, modo: f.modo, nuevaDeudaUsd: fNum('nueva'), montoUsd: fNum('montoUsd'), motivo: f.motivo })];
@@ -1521,6 +1579,15 @@ Object.assign(ACT, {
       : { Nombre: '', SueldoSemanalUSD: '60,00', DiasSemana: '6', DescuentoSemanalUSD: '0,00', volver: true });
   },
   hojaMovimiento(el) { hojaMovimiento(el.dataset.id); },
+  editarMov(el) {
+    const x = S.fin.movimientos.find((m) => String(m.ID) === String(el.dataset.id));
+    const extra = {
+      movId: x.ID, moneda: x.Moneda, monto: fmtIn(x.Monto), fecha: x.Fecha, notas: x.Notas || '',
+      titulo: x.Categoria + (x.Persona ? ' · ' + x.Persona : ''),
+    };
+    if (x.Moneda === 'VES' && x.Tasa) extra.tasa = String(x.Tasa).replace('.', ',');
+    nuevoForm('movimiento', extra);
+  },
   fSet(el) { S.form[el.dataset.k] = el.dataset.v; pintarForm(); },
   fMoneda(el) { S.form.moneda = el.dataset.m; pintarForm(); },
   fToggleActivo(el) { S.form.Activo = el.checked; },
@@ -1543,7 +1610,7 @@ Object.assign(ACT, {
   },
   async eliminarMov(el) {
     const msg = el.dataset.orden
-      ? '¿Eliminar este cobro? La cotización volverá a "Por cobrar".'
+      ? '¿Eliminar este cobro? Se eliminan todos los pagos y abonos de esa cotización y volverá a "Por cobrar".'
       : '¿Eliminar este movimiento? No se puede deshacer.';
     if (!confirm(msg)) return;
     await conEspera(el, async () => {
@@ -1596,7 +1663,7 @@ function gruposCobranza() {
     const k = String(o.ClienteID);
     const g = map[k] || (map[k] = { clienteId: o.ClienteID, nombre: o.ClienteNombre, ordenes: [], total: 0, dias: 0, ultimo: '', veces: 0 });
     g.ordenes.push(o);
-    g.total += o.TotalUSD || 0;
+    g.total += o.SaldoUSD || 0;
     g.dias = Math.max(g.dias, diasDesde(o.FechaCierre));
     if (o.UltimoRecordatorio && (!g.ultimo || new Date(o.UltimoRecordatorio) > new Date(g.ultimo))) g.ultimo = o.UltimoRecordatorio;
     g.veces = Math.max(g.veces, o.Recordatorios || 0);
@@ -1622,7 +1689,8 @@ function textoRecordatorioGrupo(g) {
   const t = tasaHoy();
   return '¡Hola, Sr(a). ' + (c ? c.Nombre : g.nombre).trim() + '! Le saludamos de Autolavado Burbujas.\n' +
     'Le recordamos que tiene pendientes las siguientes cotizaciones:\n' +
-    g.ordenes.map((o) => '• ' + o.Numero + ' del ' + fechaCorta(o.FechaCierre) + ': $' + r2(o.TotalUSD).toFixed(2)).join('\n') +
+    g.ordenes.map((o) => '• ' + o.Numero + ' del ' + fechaCorta(o.FechaCierre) + ': $' + r2(o.SaldoUSD).toFixed(2) +
+      (o.AbonadoUSD ? ' (ya abonó $' + r2(o.AbonadoUSD).toFixed(2) + ')' : '')).join('\n') +
     '\n\nTotal: $' + g.total.toFixed(2) +
     (t ? ' (' + r2(g.total * t).toFixed(2) + ' Bs a la tasa BCV de hoy: ' + t.toFixed(2) + ')' : '') + '.\n\n' +
     datosPagoTexto() + '\n\n¡Muchas gracias por su preferencia!';
@@ -1676,7 +1744,7 @@ function viewCobranza() {
           <div class="pills" style="margin-top:6px">${textoRecordado(g)}${c && c.Telefono ? '' : '<span class="badge warn">Sin teléfono</span>'}</div></div>
         <div class="amount">${usd(g.total)}<small>${totalBsTexto(g.total)}</small></div>
       </div>
-      <div class="services">${g.ordenes.map((o) => `<div class="meta">${esc(o.Numero)} · ${fechaCorta(o.FechaCierre)} · ${usd(o.TotalUSD)}</div>`).join('')}</div>
+      <div class="services">${g.ordenes.map((o) => `<div class="meta">${esc(o.Numero)} · ${fechaCorta(o.FechaCierre)} · ${usd(o.SaldoUSD)}${o.AbonadoUSD ? ' (abonó ' + usd(o.AbonadoUSD) + ')' : ''}</div>`).join('')}</div>
       <div class="actions">
         ${botonRecordar(g)}
         <button type="button" class="btn ok" data-act="cobrarGrupo" data-cliente="${g.clienteId}">Cobrar</button>
@@ -1692,7 +1760,7 @@ function viewCobranza() {
 function abrirCobroMultiple(g) {
   const t = tasaHoy();
   S.cobroMulti = {
-    clienteId: g.clienteId, nombre: g.nombre, ordenes: g.ordenes.map((o) => ({ ID: o.ID, Numero: o.Numero, TotalUSD: o.TotalUSD, FechaCierre: o.FechaCierre })),
+    clienteId: g.clienteId, nombre: g.nombre, ordenes: g.ordenes.map((o) => ({ ID: o.ID, Numero: o.Numero, TotalUSD: o.SaldoUSD, FechaCierre: o.FechaCierre })),
     total: g.total, fecha: hoyISO(), tasa: t ? String(t).replace('.', ',') : '', modo: 'pm', codigo: nuevoCodigo(),
   };
   pintarCobroMultiple();
@@ -1753,7 +1821,7 @@ Object.assign(ACT, {
     try {
       for (const o of m.ordenes) {
         el.innerHTML = '<span class="spinner"></span> Cobrando ' + (hechas + 1) + ' de ' + m.ordenes.length;
-        const r = await api('registrarPago', {
+        const r = await api('cobrar', {
           id: o.ID,
           PagoMovilBs: m.modo === 'pm' ? r2(o.TotalUSD * t) : 0,
           EfectivoUsd: m.modo === 'ef' ? o.TotalUSD : 0,
@@ -1793,11 +1861,126 @@ CH.cmFecha = async function (el) {
 };
 
 // -----------------------------------------------------------------------------
+// AJUSTES: editar órdenes y cotizaciones (precios, cortesías, servicios)
+// -----------------------------------------------------------------------------
+
+function totalEdicion() {
+  return r2(Object.values(S.edit.sel).reduce((s, x) => s + (x.cortesia ? 0 : Number(x.precio) || 0), 0));
+}
+
+function abrirEdicion(id) {
+  const o = buscarOrden(id);
+  if (!o) return;
+  if ((o.Servicios || []).some((s) => s.ID === undefined || s.ID === null || s.ID === '')) {
+    toast('Esta orden es antigua y no se puede editar aquí. Use la app anterior.', true);
+    return;
+  }
+  const sel = {};
+  const nombres = {};
+  o.Servicios.forEach((s) => {
+    sel[s.ID] = { precio: s.Cortesia ? 0 : s.Precio_USD, cortesia: s.Cortesia };
+    nombres[s.ID] = s.Nombre;
+  });
+  S.edit = {
+    id: o.ID, numero: o.Numero, cliente: o.ClienteNombre, pendiente: o.Estado === 'Enviada',
+    abonado: o.AbonadoUSD || 0, sel, nombres, notas: o.Notas || '', codigo: nuevoCodigo(),
+  };
+  pintarEdicion();
+}
+
+function nombreServicio(id) {
+  const s = (S.data.catalogo || []).find((x) => String(x.ID) === String(id));
+  return s ? s.Nombre : (S.edit.nombres[id] || 'Servicio ' + id);
+}
+
+function pintarEdicion() {
+  const e = S.edit;
+  const ids = Object.keys(e.sel);
+  const disponibles = (S.data.catalogo || []).filter((s) => !e.sel[s.ID]);
+  abrirHoja(`<h3>${e.pendiente ? 'Editar cotización ' + esc(e.numero) : 'Editar orden'}</h3><div class="sub">${esc(e.cliente)}</div>
+    ${ids.map((id) => {
+      const x = e.sel[id];
+      return `<div class="card" style="padding:10px 12px">
+        <div class="card-row"><b>${esc(nombreServicio(id))}</b>
+          <button type="button" class="btn small ghost danger" data-act="edQuitar" data-id="${id}" aria-label="Quitar">✕</button></div>
+        <div class="row2" style="align-items:center">
+          <input class="input" style="margin-top:4px" inputmode="decimal" data-in="edPrecio" data-id="${id}" value="${x.cortesia ? '' : fmtIn(x.precio)}" ${x.cortesia ? 'disabled placeholder="Cortesía"' : ''} aria-label="Precio en dólares">
+          <label style="display:flex;align-items:center;gap:8px;font-size:15px"><input type="checkbox" data-act="edCortesia" data-id="${id}" ${x.cortesia ? 'checked' : ''} style="width:22px;height:22px"> Cortesía</label>
+        </div></div>`;
+    }).join('')}
+    ${disponibles.length ? `<h2 class="section">Agregar servicio</h2><div class="pills">${disponibles.map((s) =>
+      `<button type="button" class="pill" data-act="edAgregar" data-id="${s.ID}">+ ${esc(s.Nombre)} · ${usd(s.Precio_USD)}</button>`).join('')}</div>` : ''}
+    <button type="button" class="btn small mt" data-act="edTodoCortesia">Toda la orden como cortesía</button>
+    <label class="field">Nota<textarea class="input" data-in="edNotas" placeholder="Opcional">${esc(e.notas)}</textarea></label>
+    <div class="big-amount" id="ed-total">${usd(totalEdicion())}</div>
+    ${e.abonado ? `<p class="note">Ya abonó ${usd(e.abonado)}: el total no puede quedar por debajo de eso.</p>` : ''}
+    ${e.pendiente ? '<p class="note">Al guardar se prepara el mensaje actualizado para enviarle al cliente. Si todo queda en cortesía, la cotización se cierra.</p>' : ''}
+    <div class="actions"><button type="button" class="btn primary block" data-act="edGuardar">Guardar cambios</button>
+    <button type="button" class="btn ghost block" data-act="cerrarHoja">Cancelar</button></div>`);
+}
+
+function pintarTotalEdicion() {
+  const el = document.getElementById('ed-total');
+  if (el) el.textContent = usd(totalEdicion());
+}
+
+Object.assign(ACT, {
+  editarOrden(el) { abrirEdicion(el.dataset.id); },
+  edQuitar(el) { delete S.edit.sel[el.dataset.id]; pintarEdicion(); },
+  edAgregar(el) {
+    const s = S.data.catalogo.find((x) => String(x.ID) === String(el.dataset.id));
+    S.edit.sel[s.ID] = { precio: s.Precio_USD, cortesia: false };
+    pintarEdicion();
+  },
+  edCortesia(el) {
+    const x = S.edit.sel[el.dataset.id];
+    x.cortesia = el.checked;
+    if (!x.cortesia && !x.precio) {
+      const s = (S.data.catalogo || []).find((c) => String(c.ID) === String(el.dataset.id));
+      x.precio = s ? s.Precio_USD : 0;
+    }
+    pintarEdicion();
+  },
+  edTodoCortesia() {
+    if (!confirm('¿Marcar todos los servicios como cortesía? El total quedará en $0.')) return;
+    Object.values(S.edit.sel).forEach((x) => { x.cortesia = true; });
+    pintarEdicion();
+  },
+  async edGuardar(el) {
+    const e = S.edit;
+    const servicios = Object.entries(e.sel).map(([id, x]) => ({ ID: Number(id), Precio_USD: x.cortesia ? 0 : r2(x.precio), Cortesia: x.cortesia }));
+    if (!servicios.length) { toast('Deje al menos un servicio.', true); return; }
+    if (servicios.some((s) => !s.Cortesia && !(s.Precio_USD >= 0))) { toast('Revise los precios.', true); return; }
+    await conEspera(el, async () => {
+      const r = await api('editarOrden', { id: e.id, servicios, notas: e.notas }, e.codigo);
+      aplicarEstado(r.estado);
+      render();
+      if (r.modo === 'cotizacion-pendiente' && r.texto) {
+        S.finalizado = r;
+        hojaFinalizado(r, r.esCortesia ? 'Cotización cerrada como cortesía' : 'Cotización ' + r.numero + ' actualizada');
+      } else {
+        cerrarHoja();
+        toast(r.mensaje || 'Orden actualizada ✓');
+      }
+    });
+  },
+  cobroParcial(el) { S.cobro.parcial = el.checked; refrescarChequeoCobro(); },
+});
+
+INP.edPrecio = function (el) {
+  const n = parseNum(el.value);
+  S.edit.sel[el.dataset.id].precio = isNaN(n) ? 0 : n;
+  pintarTotalEdicion();
+};
+INP.edNotas = function (el) { S.edit.notas = el.value; };
+
+// -----------------------------------------------------------------------------
 // Inicio
 // -----------------------------------------------------------------------------
 
 (function iniciar() {
   S.data = ls.json(K.cache, null);
+  normalizarPendientes(S.data);
   S.draft = Object.assign(borradorVacio(), ls.json(K.draft, {}));
   S.fin = ls.json(K.fin, null);
   S.finMes = S.fin ? S.fin.mes.clave : '';

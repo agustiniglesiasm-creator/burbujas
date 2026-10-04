@@ -1,6 +1,6 @@
 // Service worker: guarda la app en el teléfono para que abra al instante.
 // Al publicar cambios, suba el número de VERSION.
-const VERSION = 'burbujas-v6';
+const VERSION = 'burbujas-v8';
 const ARCHIVOS = [
   './',
   'index.html',
@@ -12,7 +12,12 @@ const ARCHIVOS = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(ARCHIVOS)));
+  // cache: 'reload' evita copiar archivos viejos de la caché del navegador.
+  event.waitUntil(
+    caches.open(VERSION).then((cache) =>
+      cache.addAll(ARCHIVOS.map((url) => new Request(url, { cache: 'reload' })))
+    )
+  );
   self.skipWaiting();
 });
 
@@ -25,7 +30,8 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Archivos de la app: responde desde la copia local y actualiza en segundo plano.
+// Archivos de la app: responde desde la copia local y la actualiza en segundo plano,
+// consultando siempre al servidor (sin la caché del navegador).
 // Las peticiones a la API (POST a script.google.com) no pasan por aquí.
 self.addEventListener('fetch', (event) => {
   const req = event.request;
@@ -34,7 +40,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches.open(VERSION).then(async (cache) => {
       const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(req)
+      const network = fetch(req, { cache: 'no-cache' })
         .then((res) => {
           if (res.ok) cache.put(req, res.clone());
           return res;
