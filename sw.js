@@ -1,6 +1,6 @@
 // Service worker: guarda la app en el teléfono para que abra al instante.
 // Al publicar cambios, suba el número de VERSION.
-const VERSION = 'burbujas-v5';
+const VERSION = 'burbujas-v6';
 const ARCHIVOS = [
   './',
   'index.html',

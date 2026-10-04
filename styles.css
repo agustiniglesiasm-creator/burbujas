@@ -273,3 +273,4 @@ textarea.input { min-height: 72px; resize: vertical; }
 .hist-row { display: grid; grid-template-columns: 1.1fr 1fr 1fr 1fr; gap: 6px; padding: 8px 0; font-size: 14px; border-bottom: 1px solid var(--border); text-align: right; }
 .hist-row > :first-child { text-align: left; text-transform: capitalize; }
 .hist-row:last-child { border-bottom: 0; font-size: 12px; }
+.btn.wa-outline { background: var(--surface); border-color: var(--wa); color: var(--wa); }

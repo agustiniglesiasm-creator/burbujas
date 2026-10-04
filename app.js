@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 
 const K = {
   url: 'bur_api',
@@ -41,6 +41,8 @@ const S = {
   fin: null,
   finMes: '',
   form: null,
+  cobFiltro: '',
+  cobroMulti: null,
 };
 
 // -----------------------------------------------------------------------------
@@ -300,6 +302,7 @@ function cerrarHoja() {
   document.getElementById('sheet-backdrop').hidden = true;
   S.cobro = null;
   S.form = null;
+  S.cobroMulti = null;
 }
 
 async function conEspera(el, fn) {
@@ -334,7 +337,7 @@ function render() {
     return;
   }
 
-  const views = { hoy: viewHoy, nueva: viewNueva, clientes: viewClientes, dinero: viewDinero, mas: viewMas };
+  const views = { hoy: viewHoy, nueva: viewNueva, clientes: viewClientes, dinero: viewDinero, cobranza: viewCobranza, mas: viewMas };
   app.innerHTML = (views[S.view] || viewHoy)() + viewNav();
 }
 
@@ -394,7 +397,7 @@ function viewHoy() {
       <div class="kpi wide"><div class="label">Cobrado hoy</div><div class="value">${usd(c.cobradoUsd)}</div>
         <div class="hint">${bs(c.pagoMovilBs)} pago móvil · ${usd(c.efectivoUsd)} efectivo · ${c.cobros} cobro(s)${c.egresosUsd ? ' · gastos ' + usd(c.egresosUsd) : ''}</div></div>
       <div class="kpi"><div class="label">Órdenes hoy</div><div class="value">${c.ordenesHoy}</div></div>
-      <div class="kpi"><div class="label">Por cobrar</div><div class="value">${usd(porCobrar)}</div><div class="hint">${pendientes.length} cotización(es)</div></div>
+      <div class="kpi" data-act="nav" data-v="cobranza" role="button" style="cursor:pointer"><div class="label">Por cobrar ›</div><div class="value">${usd(porCobrar)}</div><div class="hint">${pendientes.length} cotización(es)</div></div>
     </div>`;
   }
 
@@ -413,7 +416,9 @@ function viewHoy() {
       </div>
     </article>`).join('') : '<div class="empty">No hay vehículos en proceso.<br>Toque <b>Nueva</b> para registrar uno.</div>';
 
-  html += `<h2 class="section">Por cobrar <span class="count">${pendientes.length}</span></h2>`;
+  const paraRecordar = gruposCobranza().filter((g) => g.porRecordar).length;
+  html += `<h2 class="section">Por cobrar <span class="count">${pendientes.length}</span>
+    <button type="button" class="btn small ghost" style="margin-left:auto" data-act="nav" data-v="cobranza">Cobranza${paraRecordar ? ' · ' + paraRecordar + ' para recordar' : ''} ›</button></h2>`;
   html += pendientes.length ? pendientes.map((o) => {
     const dias = diasDesde(o.FechaCierre);
     const vieja = dias >= 3;
@@ -737,6 +742,7 @@ function viewMas() {
     <h2 class="section">Opciones</h2>
     ${old ? `<a class="list-item" href="${esc(old)}" target="_blank" rel="noopener"><span>Finanzas y resúmenes (app anterior)</span><span class="meta">↗</span></a>` : ''}
     <button type="button" class="list-item" data-act="appAnterior"><span>${old ? 'Cambiar enlace de la app anterior' : 'Enlazar la app anterior (finanzas)'}</span><span class="meta">›</span></button>
+    <button type="button" class="list-item" data-act="nav" data-v="cobranza"><span>Cobranza</span><span class="meta">›</span></button>
     ${esDueno() ? '<button type="button" class="list-item" data-act="usuarios"><span>Usuarios y teléfonos</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="cambiarPin"><span>Cambiar mi PIN</span><span class="meta">›</span></button>
     ${esDueno() ? '<button type="button" class="list-item" data-act="completarTasas"><span>Calcular tasas del historial</span><span class="meta">›</span></button>' : ''}
@@ -855,7 +861,7 @@ const ACT = {
     const tel = c ? telWa(c.Telefono) : '';
     abrirHoja(`<h3>${esc(o.Numero)} · ${esc(o.ClienteNombre)}</h3><div class="sub">${usd(o.TotalUSD)} · ${hace(o.FechaCierre)}</div>
       <div class="actions">
-        <a class="btn wa block" href="${waLink(tel, textoRecordatorio(o))}" target="_blank" rel="noopener">Recordar pago por WhatsApp</a>
+        <a class="btn wa block" href="${waLink(tel, textoRecordatorio(o))}" target="_blank" rel="noopener" data-act="recordado" data-ids="${o.ID}">Recordar pago por WhatsApp</a>
         ${esGerencia() ? `<button type="button" class="btn danger block" data-act="eliminarCotizacion" data-id="${o.ID}">Eliminar cotización</button>` : ''}
         <button type="button" class="btn ghost block" data-act="cerrarHoja">Volver</button></div>`);
   },
@@ -1575,6 +1581,215 @@ CH.fFecha = async function (el) {
     }
   }
   if (S.form === f) pintarForm();
+};
+
+// -----------------------------------------------------------------------------
+// COBRANZA (etapa 3): cotizaciones por cobrar agrupadas por cliente
+// -----------------------------------------------------------------------------
+
+const COB_DIAS_MIN = 2; // se sugiere recordar deudas de 2 días o más
+const COB_DIAS_ENTRE = 3; // y no más de una vez cada 3 días
+
+function gruposCobranza() {
+  const map = {};
+  ((S.data && S.data.pendientes) || []).forEach((o) => {
+    const k = String(o.ClienteID);
+    const g = map[k] || (map[k] = { clienteId: o.ClienteID, nombre: o.ClienteNombre, ordenes: [], total: 0, dias: 0, ultimo: '', veces: 0 });
+    g.ordenes.push(o);
+    g.total += o.TotalUSD || 0;
+    g.dias = Math.max(g.dias, diasDesde(o.FechaCierre));
+    if (o.UltimoRecordatorio && (!g.ultimo || new Date(o.UltimoRecordatorio) > new Date(g.ultimo))) g.ultimo = o.UltimoRecordatorio;
+    g.veces = Math.max(g.veces, o.Recordatorios || 0);
+  });
+  return Object.values(map).map((g) => {
+    g.ordenes.sort((a, b) => new Date(a.FechaCierre) - new Date(b.FechaCierre));
+    g.total = r2(g.total);
+    g.porRecordar = g.dias >= COB_DIAS_MIN && (!g.ultimo || diasDesde(g.ultimo) >= COB_DIAS_ENTRE);
+    return g;
+  }).sort((a, b) => (b.porRecordar - a.porRecordar) || (b.dias - a.dias));
+}
+
+function datosPagoTexto() {
+  const cfg = S.data.config || {};
+  return '💳 Datos para Pago Móvil:\n* Banco: ' + cfg.Banco + '\n* Teléfono: ' + cfg.Telefono_Pago_Movil +
+    '\n* RIF/Cédula: ' + cfg.Cedula_RIF;
+}
+
+/** Mensaje de recordatorio (en usted) con una o varias cotizaciones. */
+function textoRecordatorioGrupo(g) {
+  if (g.ordenes.length === 1) return textoRecordatorio(g.ordenes[0]);
+  const c = clientePorId(g.clienteId);
+  const t = tasaHoy();
+  return '¡Hola, Sr(a). ' + (c ? c.Nombre : g.nombre).trim() + '! Le saludamos de Autolavado Burbujas.\n' +
+    'Le recordamos que tiene pendientes las siguientes cotizaciones:\n' +
+    g.ordenes.map((o) => '• ' + o.Numero + ' del ' + fechaCorta(o.FechaCierre) + ': $' + r2(o.TotalUSD).toFixed(2)).join('\n') +
+    '\n\nTotal: $' + g.total.toFixed(2) +
+    (t ? ' (' + r2(g.total * t).toFixed(2) + ' Bs a la tasa BCV de hoy: ' + t.toFixed(2) + ')' : '') + '.\n\n' +
+    datosPagoTexto() + '\n\n¡Muchas gracias por su preferencia!';
+}
+
+function textoRecordado(g) {
+  if (!g.ultimo) return '<span class="badge">Sin recordar</span>';
+  const d = diasDesde(g.ultimo);
+  return `<span class="badge ${d >= COB_DIAS_ENTRE ? '' : 'ok'}">Recordado ${d === 0 ? 'hoy' : hace(g.ultimo)}${g.veces > 1 ? ' · ' + g.veces + ' veces' : ''}</span>`;
+}
+
+function botonRecordar(g, clase) {
+  const c = clientePorId(g.clienteId);
+  const tel = c ? telWa(c.Telefono) : '';
+  const ids = g.ordenes.map((o) => o.ID).join(',');
+  return `<a class="btn wa-outline ${clase || ''}" href="${waLink(tel, textoRecordatorioGrupo(g))}" target="_blank" rel="noopener" data-act="recordado" data-ids="${ids}">Recordar</a>`;
+}
+
+function viewCobranza() {
+  const grupos = gruposCobranza();
+  const porRecordar = grupos.filter((g) => g.porRecordar);
+  const total = grupos.reduce((s, g) => s + g.total, 0);
+  if (!S.cobFiltro) S.cobFiltro = porRecordar.length ? 'recordar' : 'todos';
+  const lista = S.cobFiltro === 'recordar' ? porRecordar : grupos;
+
+  let html = topbar('Cobranza', 'Cotizaciones por cobrar') + `<main class="screen">
+    <button type="button" class="btn small ghost" data-act="nav" data-v="hoy">‹ Volver a Hoy</button>
+    <div class="kpis mt">
+      <div class="kpi wide"><div class="label">Total por cobrar</div><div class="value">${usd(total)}</div>
+        <div class="hint">${totalBsTexto(total)} a la tasa de hoy · ${grupos.length} cliente(s)</div></div>
+    </div>
+    <div class="pills mt">
+      <button type="button" class="pill ${S.cobFiltro === 'recordar' ? 'on' : ''}" data-act="cobFiltro" data-v="recordar">Para recordar hoy (${porRecordar.length})</button>
+      <button type="button" class="pill ${S.cobFiltro === 'todos' ? 'on' : ''}" data-act="cobFiltro" data-v="todos">Todos (${grupos.length})</button>
+    </div>
+    <p class="note">Se sugiere recordar a quien debe hace ${COB_DIAS_MIN} días o más y no recibió recordatorio en los últimos ${COB_DIAS_ENTRE} días.</p>`;
+
+  if (!lista.length) {
+    html += S.cobFiltro === 'recordar' && grupos.length
+      ? '<div class="empty">Nadie para recordar hoy. ✓<br>Toque <b>Todos</b> para ver todas las deudas.</div>'
+      : '<div class="empty">No hay cotizaciones por cobrar. 🎉</div>';
+    return html + '</main>';
+  }
+
+  html += lista.map((g) => {
+    const c = clientePorId(g.clienteId);
+    return `<article class="card ${g.dias >= 7 ? 'alert' : ''}">
+      <div class="card-row">
+        <div><div class="name">${esc(g.nombre)}</div>
+          <div class="meta">${g.ordenes.length} cotización(es) · la más vieja ${g.dias === 0 ? 'de hoy' : hace(g.ordenes[0].FechaCierre)}</div>
+          <div class="pills" style="margin-top:6px">${textoRecordado(g)}${c && c.Telefono ? '' : '<span class="badge warn">Sin teléfono</span>'}</div></div>
+        <div class="amount">${usd(g.total)}<small>${totalBsTexto(g.total)}</small></div>
+      </div>
+      <div class="services">${g.ordenes.map((o) => `<div class="meta">${esc(o.Numero)} · ${fechaCorta(o.FechaCierre)} · ${usd(o.TotalUSD)}</div>`).join('')}</div>
+      <div class="actions">
+        ${botonRecordar(g)}
+        <button type="button" class="btn ok" data-act="cobrarGrupo" data-cliente="${g.clienteId}">Cobrar</button>
+      </div>
+    </article>`;
+  }).join('');
+
+  return html + '</main>';
+}
+
+// Cobrar varias cotizaciones de un mismo cliente en un solo paso.
+
+function abrirCobroMultiple(g) {
+  const t = tasaHoy();
+  S.cobroMulti = {
+    clienteId: g.clienteId, nombre: g.nombre, ordenes: g.ordenes.map((o) => ({ ID: o.ID, Numero: o.Numero, TotalUSD: o.TotalUSD, FechaCierre: o.FechaCierre })),
+    total: g.total, fecha: hoyISO(), tasa: t ? String(t).replace('.', ',') : '', modo: 'pm', codigo: nuevoCodigo(),
+  };
+  pintarCobroMultiple();
+}
+
+function pintarCobroMultiple() {
+  const m = S.cobroMulti;
+  const t = parseNum(m.tasa) > 0 ? parseNum(m.tasa) : null;
+  const totalBs = t ? m.ordenes.reduce((s, o) => s + r2(o.TotalUSD * t), 0) : 0;
+  abrirHoja(`<h3>Cobrar todo · ${esc(m.nombre)}</h3><div class="sub">${m.ordenes.length} cotizaciones</div>
+    ${m.ordenes.map((o) => `<div class="list-item" style="cursor:default"><div><div>${esc(o.Numero)}</div><div class="meta">${fechaCorta(o.FechaCierre)}</div></div>
+      <div style="display:flex;align-items:center;gap:8px"><b>${usd(o.TotalUSD)}</b>
+      <button type="button" class="btn small" data-act="cobrarUna" data-id="${o.ID}">Solo esta</button></div></div>`).join('')}
+    <div class="big-amount">${usd(m.total)}<small>${t && m.modo === 'pm' ? bs(totalBs) : ''}</small></div>
+    <div class="segmented two">
+      <button type="button" class="${m.modo === 'pm' ? 'on' : ''}" data-act="cmModo" data-m="pm">Pago móvil</button>
+      <button type="button" class="${m.modo === 'ef' ? 'on' : ''}" data-act="cmModo" data-m="ef">Efectivo $</button></div>
+    <div class="row2">
+      <label class="field">Fecha del pago<input class="input" type="date" data-ch="cmFecha" value="${esc(m.fecha)}" max="${esc(hoyISO())}"></label>
+      ${m.modo === 'pm' ? `<label class="field">Tasa BCV<input class="input" inputmode="decimal" data-in="cmTasa" value="${esc(m.tasa)}"></label>` : '<span></span>'}
+    </div>
+    ${m.modo === 'pm' ? (t ? `<p class="note">Verifique que recibió <b>${bs(totalBs)}</b> en el banco.</p>` : '<p class="note warn">Escriba la tasa BCV del día del pago.</p>') : ''}
+    <p class="note">Para un pago mixto o un monto distinto, use "Solo esta" en cada cotización.</p>
+    <div class="actions">
+      <button type="button" class="btn ok block" data-act="confirmarCobroMultiple">Cobrar ${m.ordenes.length} cotizaciones</button>
+      <button type="button" class="btn ghost block" data-act="cerrarHoja">Cancelar</button></div>`);
+}
+
+Object.assign(ACT, {
+  cobFiltro(el) { S.cobFiltro = el.dataset.v; render(); },
+  recordado(el) {
+    // El enlace abre WhatsApp; aquí solo se anota el recordatorio.
+    const ids = el.dataset.ids.split(',');
+    const ahora = new Date().toISOString();
+    (S.data.pendientes || []).forEach((o) => {
+      if (ids.includes(String(o.ID))) { o.UltimoRecordatorio = ahora; o.Recordatorios = (o.Recordatorios || 0) + 1; }
+    });
+    guardarCache();
+    setTimeout(() => { if (S.view === 'cobranza' || S.view === 'hoy') render(); }, 400);
+    api('recordatorio', { ids }, 'rec' + ids.join('') + 'x' + Math.floor(Date.now() / 600000))
+      .then((r) => aplicarEstado(r.estado))
+      .catch((e) => toast('No se pudo anotar el recordatorio: ' + e.message, true));
+  },
+  cobrarGrupo(el) {
+    const g = gruposCobranza().find((x) => String(x.clienteId) === String(el.dataset.cliente));
+    if (!g) return;
+    if (g.ordenes.length === 1) abrirCobro(g.ordenes[0].ID); else abrirCobroMultiple(g);
+  },
+  cobrarUna(el) { S.cobroMulti = null; abrirCobro(el.dataset.id); },
+  cmModo(el) { S.cobroMulti.modo = el.dataset.m; pintarCobroMultiple(); },
+  async confirmarCobroMultiple(el) {
+    const m = S.cobroMulti;
+    const t = parseNum(m.tasa) > 0 ? parseNum(m.tasa) : null;
+    if (m.modo === 'pm' && !t) { toast('Indique la tasa BCV.', true); return; }
+    if (!confirm('¿Registrar el cobro de ' + m.ordenes.length + ' cotizaciones de ' + m.nombre + '?')) return;
+    el.disabled = true;
+    let hechas = 0;
+    try {
+      for (const o of m.ordenes) {
+        el.innerHTML = '<span class="spinner"></span> Cobrando ' + (hechas + 1) + ' de ' + m.ordenes.length;
+        const r = await api('registrarPago', {
+          id: o.ID,
+          PagoMovilBs: m.modo === 'pm' ? r2(o.TotalUSD * t) : 0,
+          EfectivoUsd: m.modo === 'ef' ? o.TotalUSD : 0,
+          Fecha: m.fecha,
+          Tasa: m.modo === 'pm' ? t : '',
+          Referencia: '',
+        }, m.codigo + 'o' + o.ID);
+        aplicarEstado(r.estado);
+        hechas++;
+      }
+      cerrarHoja();
+      render();
+      toast(hechas + ' cotizaciones cobradas ✓');
+    } catch (e) {
+      render();
+      toast('Se cobraron ' + hechas + ' de ' + m.ordenes.length + '. ' + e.message, true);
+      if (el.isConnected) { el.disabled = false; el.textContent = 'Reintentar las que faltan'; }
+      m.ordenes = m.ordenes.slice(hechas);
+      m.total = r2(m.ordenes.reduce((s, o) => s + o.TotalUSD, 0));
+    }
+  },
+});
+
+INP.cmTasa = function (el) { S.cobroMulti.tasa = el.value; };
+
+CH.cmFecha = async function (el) {
+  const m = S.cobroMulti;
+  m.fecha = el.value || hoyISO();
+  try {
+    const r = await api('tasaFecha', { fecha: m.fecha });
+    m.tasa = r && r.tasa ? String(r.tasa).replace('.', ',') : '';
+    if (!m.tasa) toast('No hay tasa guardada para ese día. Escríbala.', true);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  if (S.cobroMulti === m) pintarCobroMultiple();
 };
 
 // -----------------------------------------------------------------------------
