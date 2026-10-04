@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 const K = {
   url: 'bur_api',
@@ -148,7 +148,12 @@ function nombreDispositivo() {
 // API
 // -----------------------------------------------------------------------------
 
-async function api(accion, datos) {
+/** Código único de un envío: si se reintenta, el servidor no lo guarda dos veces. */
+function nuevoCodigo() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+async function api(accion, datos, idem) {
   const url = ls.get(K.url);
   let res;
 
@@ -156,17 +161,22 @@ async function api(accion, datos) {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ accion, token: ls.get(K.token), datos: datos || {} }),
+      body: JSON.stringify({ accion, token: ls.get(K.token), datos: datos || {}, idem: idem || '' }),
     });
   } catch (e) {
     throw new Error('Sin conexión. Revise su internet e intente de nuevo.');
   }
 
+  const texto = await res.text().catch(() => '');
   let json;
   try {
-    json = await res.json();
+    json = JSON.parse(texto);
   } catch (e) {
-    throw new Error('El servidor no respondió correctamente. Intente de nuevo.');
+    // Apps Script devolvió una página de error: mostrar el motivo si se puede leer.
+    const motivo = texto.replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error('El servidor no respondió correctamente (' + res.status + '). ' +
+      (motivo ? 'Detalle: ' + motivo + '. ' : '') + 'Revise si se guardó antes de repetir.');
   }
 
   if (!json.ok) {
@@ -453,6 +463,7 @@ function abrirCobro(id) {
   S.cobro = {
     id: o.ID, numero: o.Numero, cliente: o.ClienteNombre, total: o.TotalUSD,
     fecha: hoyISO(), tasa: tasa ? String(tasa).replace('.', ',') : '', modo: 'pm', bs: '', usd: '', ref: '',
+    codigo: nuevoCodigo(),
   };
   prellenarCobro();
   pintarCobro();
@@ -531,7 +542,7 @@ function setInput(name, value) {
 // -----------------------------------------------------------------------------
 
 function borradorVacio() {
-  return { clienteId: null, vehiculoId: null, sel: {}, notas: '', q: '', verNota: false };
+  return { clienteId: null, vehiculoId: null, sel: {}, notas: '', q: '', verNota: false, codigo: nuevoCodigo() };
 }
 
 function guardarBorrador() {
@@ -623,6 +634,7 @@ function viewNueva() {
 }
 
 function hojaCliente(ctx, query) {
+  S.codigoHoja = nuevoCodigo();
   const pareceP = /^[a-z0-9]{5,8}$/i.test(query || '') && /\d/.test(query || '');
   abrirHoja(`<h3>Cliente nuevo</h3>
     <label class="field">Nombre *<input class="input" id="nc-nombre" autocomplete="off" value="${pareceP ? '' : esc(query || '')}"></label>
@@ -692,6 +704,7 @@ function hojaDetalleCliente(id) {
 }
 
 function hojaVehiculo(clienteId) {
+  S.codigoHoja = nuevoCodigo();
   abrirHoja(`<h3>Agregar vehículo</h3>
     <label class="field">Placa<input class="input" id="nv-placa" autocapitalize="characters" autocomplete="off"></label>
     <label class="field">Vehículo<input class="input" id="nv-veh" placeholder="Marca modelo color" autocomplete="off"></label>
@@ -769,6 +782,7 @@ const ACT = {
     render();
     window.scrollTo(0, 0);
     if (S.view === 'dinero') cargarFinanzas();
+    if (S.view === 'hoy' && Date.now() - S.lastSync > 30000) sync(false);
   },
   cerrarHoja() { cerrarHoja(); },
   refrescar() { sync(Date.now() - S.lastFull > 10 * 60000); },
@@ -814,7 +828,7 @@ const ACT = {
   // Hoy
   async finalizar(el) {
     await conEspera(el, async () => {
-      const r = await api('finalizarOrden', { id: el.dataset.id });
+      const r = await api('finalizarOrden', { id: el.dataset.id }, 'fin' + el.dataset.id);
       aplicarEstado(r.estado);
       render();
       S.finalizado = r;
@@ -872,7 +886,7 @@ const ACT = {
     await conEspera(el, async () => {
       const r = await api('registrarPago', {
         id: c.id, PagoMovilBs: b, EfectivoUsd: u, Fecha: c.fecha, Tasa: b > 0 ? t : '', Referencia: c.ref,
-      });
+      }, c.codigo);
       aplicarEstado(r.estado); cerrarHoja(); render(); toast('Cobro registrado ✓');
     });
   },
@@ -888,7 +902,7 @@ const ACT = {
     };
     if (!datos.Nombre.trim()) { toast('Escriba el nombre del cliente.', true); return; }
     await conEspera(el, async () => {
-      const r = await api('crearCliente', datos);
+      const r = await api('crearCliente', datos, S.codigoHoja);
       actualizarCliente(r.cliente);
       cerrarHoja();
       if (el.dataset.ctx === 'nueva') {
@@ -913,7 +927,7 @@ const ACT = {
     };
     if (!datos.Placa.trim() && !datos.Vehiculo.trim()) { toast('Indique la placa o el vehículo.', true); return; }
     await conEspera(el, async () => {
-      const r = await api('agregarVehiculo', datos);
+      const r = await api('agregarVehiculo', datos, S.codigoHoja);
       actualizarCliente(r.cliente);
       if (String(S.draft.clienteId) === String(datos.clienteId)) { S.draft.vehiculoId = r.vehiculoId; guardarBorrador(); }
       cerrarHoja(); render(); toast('Vehículo agregado');
@@ -951,7 +965,8 @@ const ACT = {
     const d = S.draft;
     const servicios = Object.entries(d.sel).map(([id, x]) => ({ ID: Number(id), Precio_USD: x.precio, Cortesia: x.cortesia }));
     await conEspera(el, async () => {
-      const r = await api('crearOrden', { clienteId: d.clienteId, vehiculoId: d.vehiculoId, servicios, notas: d.notas });
+      if (!d.codigo) d.codigo = nuevoCodigo();
+      const r = await api('crearOrden', { clienteId: d.clienteId, vehiculoId: d.vehiculoId, servicios, notas: d.notas }, d.codigo);
       aplicarEstado(r.estado);
       const rec = [d.clienteId].concat(ls.json(K.recents, []).filter((x) => String(x) !== String(d.clienteId))).slice(0, 8);
       ls.set(K.recents, JSON.stringify(rec));
@@ -1146,7 +1161,7 @@ function aplicarFinanzas(r) {
   S.finMes = r.mes.clave;
   ls.set(K.fin, JSON.stringify(r));
   if (S.view === 'dinero') render();
-  sync(false); // actualizar también la caja de Hoy
+  S.lastSync = 0; // la caja de Hoy se actualiza al volver a esa pantalla
 }
 
 function empleadoFin(id) {
@@ -1242,6 +1257,7 @@ function nuevoForm(hoja, extra) {
   const t = (S.fin && S.fin.tasaHoy) || tasaHoy();
   S.form = Object.assign({
     hoja,
+    codigo: nuevoCodigo(),
     fecha: hoyISO(),
     tasa: t ? String(Math.round(t * 10000) / 10000).replace('.', ',') : '',
     moneda: 'VES',
@@ -1514,7 +1530,7 @@ Object.assign(ACT, {
     if (accion === 'corte' && !confirm('¿Guardar el corte al ' + fechaDia(datos.fecha) + '?')) return;
     const volver = S.form.volver;
     await conEspera(el, async () => {
-      aplicarFinanzas(await api(accion, datos));
+      aplicarFinanzas(await api(accion, datos, S.form && S.form.codigo));
       if (volver) hojaEmpleados(); else cerrarHoja();
       toast(MENSAJES_FIN[accion]);
     });
@@ -1525,7 +1541,7 @@ Object.assign(ACT, {
       : '¿Eliminar este movimiento? No se puede deshacer.';
     if (!confirm(msg)) return;
     await conEspera(el, async () => {
-      aplicarFinanzas(await api('eliminarMovimiento', { id: el.dataset.id, mes: S.finMes }));
+      aplicarFinanzas(await api('eliminarMovimiento', { id: el.dataset.id, mes: S.finMes }, 'del' + el.dataset.id + 'x' + S.finMes.replace('-', '')));
       cerrarHoja();
       toast('Movimiento eliminado');
     });
