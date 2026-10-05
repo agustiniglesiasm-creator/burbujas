@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.7.0';
 
 const K = {
   url: 'bur_api',
@@ -14,6 +14,7 @@ const K = {
   recents: 'bur_recientes',
   oldUrl: 'bur_app_anterior',
   fin: 'bur_fin',
+  cola: 'bur_cola',
 };
 
 const ls = {
@@ -44,6 +45,17 @@ const S = {
   cobFiltro: '',
   cobroMulti: null,
   edit: null,
+  crecer: null,
+  crecerError: '',
+  crecerTab: 'inactivos',
+  inactDias: 0,
+  inactFiltro: '',
+  promoAud: '',
+  promoMsg: null,
+  cfgEdit: null,
+  cola: [],
+  enviando: false,
+  tiempos: [],
 };
 
 // -----------------------------------------------------------------------------
@@ -158,7 +170,25 @@ function nuevoCodigo() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
+function errorDeRed(mensaje) {
+  const e = new Error(mensaje);
+  e.red = true;
+  return e;
+}
+
 async function api(accion, datos, idem) {
+  const t0 = performance.now();
+  try {
+    const r = await apiSinMedir(accion, datos, idem);
+    registrarTiempo(accion, performance.now() - t0, true);
+    return r;
+  } catch (e) {
+    registrarTiempo(accion, performance.now() - t0, false);
+    throw e;
+  }
+}
+
+async function apiSinMedir(accion, datos, idem) {
   const url = ls.get(K.url);
   let res;
 
@@ -169,7 +199,7 @@ async function api(accion, datos, idem) {
       body: JSON.stringify({ accion, token: ls.get(K.token), datos: datos || {}, idem: idem || '' }),
     });
   } catch (e) {
-    throw new Error('Sin conexión. Revise su internet e intente de nuevo.');
+    throw errorDeRed('Sin conexión. Revise su internet e intente de nuevo.');
   }
 
   const texto = await res.text().catch(() => '');
@@ -180,16 +210,18 @@ async function api(accion, datos, idem) {
     // Apps Script devolvió una página de error: mostrar el motivo si se puede leer.
     const motivo = texto.replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, ' ')
       .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
-    throw new Error('El servidor no respondió correctamente (' + res.status + '). ' +
+    throw errorDeRed('El servidor no respondió correctamente (' + res.status + '). ' +
       (motivo ? 'Detalle: ' + motivo + '. ' : '') + 'Revise si se guardó antes de repetir.');
   }
 
   if (!json.ok) {
+    const err = new Error(json.error || 'Ocurrió un error.');
     if (json.codigo === 'AUTH') {
+      err.auth = true;
       cerrarSesionLocal();
       render();
     }
-    throw new Error(json.error || 'Ocurrió un error.');
+    throw err;
   }
 
   return json.data;
@@ -217,7 +249,7 @@ function aplicarEstado(estado) {
   guardarCache();
 }
 
-async function sync(full) {
+async function sync(full, fresco) {
   if (S.syncing || !ls.get(K.token)) return;
   S.syncing = true;
   pintarSync();
@@ -225,12 +257,14 @@ async function sync(full) {
 
   try {
     if (full || !S.data) {
-      S.data = await api('bootstrap');
+      S.data = await api('bootstrap', fresco ? { fresco: true } : {});
       normalizarPendientes(S.data);
+      reaplicarOptimistas();
       S.lastFull = Date.now();
       guardarCache();
     } else {
-      aplicarEstado(await api('estado'));
+      aplicarEstado(await api('estado', fresco ? { fresco: true } : {}));
+      reaplicarOptimistas();
     }
     S.lastSync = Date.now();
     S.loadError = '';
@@ -278,6 +312,10 @@ function viewNav() {
 }
 
 function syncChipHTML() {
+  if (S.cola && S.cola.length) {
+    return (S.enviando ? '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> ' : '⏳ ') +
+      S.cola.length + ' por enviar';
+  }
   if (S.syncing) return '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Actualizando';
   const t = tasaHoy();
   return t ? 'BCV ' + nf2.format(t) : 'Sin tasa';
@@ -351,7 +389,7 @@ function render() {
     return;
   }
 
-  const views = { hoy: viewHoy, nueva: viewNueva, clientes: viewClientes, dinero: viewDinero, cobranza: viewCobranza, mas: viewMas };
+  const views = { hoy: viewHoy, nueva: viewNueva, clientes: viewClientes, dinero: viewDinero, cobranza: viewCobranza, crecer: viewCrecer, mas: viewMas };
   app.innerHTML = (views[S.view] || viewHoy)() + viewNav();
 }
 
@@ -424,10 +462,10 @@ function viewHoy() {
       </div>
       <div class="services">${serviciosTexto(o)}</div>
       ${o.Notas ? `<div class="meta">📝 ${esc(o.Notas)}</div>` : ''}
-      <div class="actions">
+      ${o.Pendiente ? '<div class="actions"><span class="badge">⏳ Guardando… podrás finalizarla en un momento</span></div>' : `<div class="actions">
         <button type="button" class="btn primary" data-act="finalizar" data-id="${o.ID}">Finalizar y avisar</button>
         <button type="button" class="btn" style="flex:0 0 52px" data-act="menuOrden" data-id="${o.ID}" aria-label="Más opciones">⋯</button>
-      </div>
+      </div>`}
     </article>`).join('') : '<div class="empty">No hay vehículos en proceso.<br>Toque <b>Nueva</b> para registrar uno.</div>';
 
   const paraRecordar = gruposCobranza().filter((g) => g.porRecordar).length;
@@ -567,7 +605,7 @@ function setInput(name, value) {
 // -----------------------------------------------------------------------------
 
 function borradorVacio() {
-  return { clienteId: null, vehiculoId: null, sel: {}, notas: '', q: '', verNota: false, codigo: nuevoCodigo() };
+  return { clienteId: null, vehiculoId: null, sel: {}, notas: '', q: '', verNota: false, codigo: nuevoCodigo(), premio: false, premioId: null, promo: false };
 }
 
 function guardarBorrador() {
@@ -629,7 +667,7 @@ function viewNueva() {
 
   html += `<div class="selected-client"><div><div style="font-weight:700">${esc(c.Nombre)}</div>
       <div class="meta">${esc(c.Telefono ? telLocal(c.Telefono) : 'Sin teléfono')}</div></div>
-      <button type="button" class="btn small" data-act="cambiarCliente">Cambiar</button></div>`;
+      <button type="button" class="btn small" data-act="cambiarCliente">Cambiar</button></div>` + bloqueCrecerNueva(c);
 
   html += '<h2 class="section">Vehículo</h2><div class="pills">' +
     vehiculos.map((v) => `<button type="button" class="pill ${String(d.vehiculoId) === String(v.ID) ? 'on' : ''}" data-act="elegirVehiculo" data-id="${v.ID}">
@@ -707,6 +745,7 @@ function hojaDetalleCliente(id) {
       ${tel ? `<a class="btn wa" href="${waLink(tel, '¡Hola, Sr(a). ' + c.Nombre.trim() + '! Le saludamos de Autolavado Burbujas.')}" target="_blank" rel="noopener">WhatsApp</a>` : '<span></span>'}
     </div>
     <button type="button" class="btn primary block mt" data-act="ordenParaCliente" data-id="${c.ID}">Nueva orden para este cliente</button>
+    ${cfgCrecer() && cfgCrecer().fidelidadCada ? `<p class="note">${tienePremio(c.ID) ? '🎁 Tiene un lavado gratis' : '⭐ Fidelidad: ' + progresoCliente(c.ID) + ' de ' + cfgCrecer().fidelidadCada + ' visitas'}</p>` : ''}
     <h2 class="section">Vehículos</h2>
     ${(c.Vehiculos || []).map((v) => `<div class="list-item" style="cursor:default"><div>${esc(v.Vehiculo || 'Vehículo')}</div><span class="meta">${esc(v.Placa)}</span></div>`).join('') || '<div class="empty">Sin vehículos.</div>'}
     <button type="button" class="btn small" data-act="nuevoVehiculo" data-id="${c.ID}">+ Agregar vehículo</button>
@@ -755,6 +794,9 @@ function viewMas() {
       <div class="meta">${esc(t.fuente || t.error || '')}${t.consultado ? ' · ' + hace(t.consultado) : ''}</div></div>
       <button type="button" class="btn small" data-act="actualizarTasa">Actualizar</button></div></div>
 
+    <h2 class="section">Velocidad de la conexión</h2>
+    <div class="card">${velocidadHTML()}</div>
+
     <h2 class="section">Datos de pago móvil</h2>
     <div class="card"><div class="meta">${esc(cfg.Banco)} · ${esc(cfg.Telefono_Pago_Movil)} · ${esc(cfg.Cedula_RIF)}</div>
       <div class="meta">Se cambian en la pestaña Config de la hoja.</div></div>
@@ -766,6 +808,7 @@ function viewMas() {
     ${esDueno() ? '<button type="button" class="list-item" data-act="usuarios"><span>Usuarios y teléfonos</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="cambiarPin"><span>Cambiar mi PIN</span><span class="meta">›</span></button>
     ${esDueno() ? '<button type="button" class="list-item" data-act="completarTasas"><span>Calcular tasas del historial</span><span class="meta">›</span></button>' : ''}
+    ${esGerencia() ? '<button type="button" class="list-item" data-act="nav" data-v="crecer"><span>Crecer: clientes, fidelidad y promociones</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="refrescarTodo"><span>Recargar todos los datos</span><span class="meta">↻</span></button>
     <button type="button" class="list-item" data-act="logout"><span style="color:var(--danger)">Cerrar sesión en este teléfono</span><span></span></button>
     <p class="note" style="text-align:center">Burbujas app ${APP_VERSION}</p></main>`;
@@ -808,11 +851,12 @@ const ACT = {
     render();
     window.scrollTo(0, 0);
     if (S.view === 'dinero') cargarFinanzas();
+    if (S.view === 'crecer') cargarCrecer();
     if (S.view === 'hoy' && Date.now() - S.lastSync > 30000) sync(false);
   },
   cerrarHoja() { cerrarHoja(); },
-  refrescar() { sync(Date.now() - S.lastFull > 10 * 60000); },
-  refrescarTodo() { sync(true).then(() => toast('Datos actualizados')); },
+  refrescar() { procesarCola(); sync(true, true); if (S.view === 'dinero') cargarFinanzas(); },
+  refrescarTodo() { sync(true, true).then(() => toast('Datos actualizados')); },
   reintentar() { S.loadError = ''; render(); sync(true); },
 
   async guardarUrl(el) {
@@ -838,7 +882,8 @@ const ACT = {
         ls.set(K.token, r.token);
         S.pin = ''; S.loginError = ''; S.data = null; S.view = 'hoy';
         render();
-        sync(true);
+        await sync(true);
+        procesarCola();
       } catch (e) {
         S.pin = ''; S.loginError = e.message; render();
       }
@@ -913,12 +958,15 @@ const ACT = {
     const diff = r2(eq - c.total);
     if (!c.parcial && Math.abs(diff) > 0.10) { toast('El monto no coincide con lo que debe. Si paga solo una parte, marque "Es un abono".', true); return; }
     if (c.parcial && (!(eq > 0) || diff > 0.10)) { toast('El abono debe ser mayor que cero y no superar lo que debe.', true); return; }
-    await conEspera(el, async () => {
-      const r = await api('cobrar', {
-        id: c.id, PagoMovilBs: b, EfectivoUsd: u, Fecha: c.fecha, Tasa: b > 0 ? t : '', Referencia: c.ref, parcial: c.parcial,
-      }, c.codigo);
-      aplicarEstado(r.estado); cerrarHoja(); render(); toast(r.mensaje || 'Cobro registrado ✓');
+    encolar({
+      accion: 'cobrar',
+      etiqueta: 'el cobro de ' + c.numero,
+      datos: { id: c.id, PagoMovilBs: b, EfectivoUsd: u, Fecha: c.fecha, Tasa: b > 0 ? t : '', Referencia: c.ref, parcial: c.parcial },
+      idem: c.codigo,
+      efecto: { id: c.id, eq: r2(eq), b: r2(b), u: r2(u), completa: Math.abs(diff) <= 0.10 },
     });
+    cerrarHoja(); render();
+    toast(Math.abs(diff) <= 0.10 ? 'Cobro registrado ✓' : 'Abono registrado ✓ Queda debiendo ' + usd(-diff));
   },
 
   // Nueva orden
@@ -943,10 +991,10 @@ const ACT = {
     });
   },
   elegirCliente(el) {
-    Object.assign(S.draft, { clienteId: Number(el.dataset.id), vehiculoId: null, q: '' });
+    Object.assign(S.draft, { clienteId: Number(el.dataset.id), vehiculoId: null, q: '', premio: false, premioId: null });
     guardarBorrador(); render(); window.scrollTo(0, 0);
   },
-  cambiarCliente() { Object.assign(S.draft, { clienteId: null, vehiculoId: null }); guardarBorrador(); render(); },
+  cambiarCliente() { Object.assign(S.draft, { clienteId: null, vehiculoId: null, premio: false, premioId: null }); guardarBorrador(); render(); },
   elegirVehiculo(el) { S.draft.vehiculoId = Number(el.dataset.id); guardarBorrador(); render(); },
   nuevoVehiculo(el) { hojaVehiculo(el.dataset.id); },
   async guardarVehiculo(el) {
@@ -966,10 +1014,13 @@ const ACT = {
   toggleSvc(el, ev) {
     if (ev.target.closest('.edit')) return;
     const id = el.dataset.id;
-    if (S.draft.sel[id]) delete S.draft.sel[id];
-    else {
+    if (S.draft.sel[id]) {
+      delete S.draft.sel[id];
+      if (String(S.draft.premioId) === String(id)) S.draft.premioId = null;
+    } else {
       const s = S.data.catalogo.find((x) => String(x.ID) === String(id));
-      S.draft.sel[id] = { precio: s.Precio_USD, cortesia: false };
+      S.draft.sel[id] = { precio: precioConPromo(s), cortesia: false };
+      aplicarPremioBorrador();
     }
     guardarBorrador(); render();
   },
@@ -994,15 +1045,36 @@ const ACT = {
   async registrarOrden(el) {
     const d = S.draft;
     const servicios = Object.entries(d.sel).map(([id, x]) => ({ ID: Number(id), Precio_USD: x.precio, Cortesia: x.cortesia }));
-    await conEspera(el, async () => {
-      if (!d.codigo) d.codigo = nuevoCodigo();
-      const r = await api('crearOrden', { clienteId: d.clienteId, vehiculoId: d.vehiculoId, servicios, notas: d.notas }, d.codigo);
-      aplicarEstado(r.estado);
-      const rec = [d.clienteId].concat(ls.json(K.recents, []).filter((x) => String(x) !== String(d.clienteId))).slice(0, 8);
-      ls.set(K.recents, JSON.stringify(rec));
-      S.draft = borradorVacio(); guardarBorrador();
-      S.view = 'hoy'; render(); window.scrollTo(0, 0); toast('Orden registrada ✓');
+    const premio = Boolean(d.premio && d.premioId && d.sel[d.premioId]);
+    if (d.premio && !premio) { toast('Elija el lavado para usar el premio, o toque "Usando ✓" para quitarlo.', true); return; }
+    const cfg = cfgCrecer();
+    const notas = [d.notas, d.promo && cfg ? 'Promoción −' + cfg.promoPct + '%' : '', premio ? 'Lavado gratis por fidelidad' : '']
+      .filter(Boolean).join(' · ');
+    if (!d.codigo) d.codigo = nuevoCodigo();
+    const c = clientePorId(d.clienteId);
+    const v = c && (c.Vehiculos || []).find((x) => String(x.ID) === String(d.vehiculoId));
+    encolar({
+      accion: 'crearOrden',
+      etiqueta: 'la orden de ' + (c ? c.Nombre : 'cliente'),
+      datos: { clienteId: d.clienteId, vehiculoId: d.vehiculoId, servicios, notas, premio },
+      idem: d.codigo,
+      efecto: {
+        orden: {
+          ID: 'tmp-' + d.codigo, ClienteID: d.clienteId, ClienteNombre: c ? c.Nombre : '',
+          Placa: v ? v.Placa : '', Vehiculo: v ? v.Vehiculo : '', Notas: notas, Estado: 'En proceso',
+          FechaCreacion: new Date().toISOString(), TotalUSD: totalBorrador(), Pendiente: true,
+          Servicios: Object.entries(d.sel).map(([id, x]) => {
+            const sv = S.data.catalogo.find((k) => String(k.ID) === String(id));
+            return { ID: Number(id), Nombre: sv ? sv.Nombre : 'Servicio', Precio_USD: x.cortesia ? 0 : x.precio, Cortesia: x.cortesia };
+          }),
+        },
+      },
     });
+    if (premio && S.data.crecer && S.data.crecer.progreso) S.data.crecer.progreso[String(d.clienteId)] = 0;
+    const rec = [d.clienteId].concat(ls.json(K.recents, []).filter((x) => String(x) !== String(d.clienteId))).slice(0, 8);
+    ls.set(K.recents, JSON.stringify(rec));
+    S.draft = borradorVacio(); guardarBorrador();
+    S.view = 'hoy'; render(); window.scrollTo(0, 0); toast('Orden registrada ✓');
   },
 
   // Clientes
@@ -1162,6 +1234,7 @@ document.getElementById('sheet-backdrop').addEventListener('click', cerrarHoja);
 
 // Al volver a la app, actualizar en segundo plano.
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') procesarCola();
   if (document.visibilityState === 'visible' && S.data && Date.now() - S.lastSync > 60000) {
     sync(Date.now() - S.lastFull > 30 * 60000);
   }
@@ -1176,6 +1249,7 @@ async function cargarFinanzas(mes) {
     const r = await api('finanzas', { mes: mes || S.finMes });
     S.fin = r;
     S.finMes = r.mes.clave;
+    reaplicarOptimistas();
     ls.set(K.fin, JSON.stringify(r));
     S.finError = '';
     if (S.view === 'dinero') render();
@@ -1189,6 +1263,7 @@ async function cargarFinanzas(mes) {
 function aplicarFinanzas(r) {
   S.fin = r;
   S.finMes = r.mes.clave;
+  reaplicarOptimistas();
   ls.set(K.fin, JSON.stringify(r));
   if (S.view === 'dinero') render();
   S.lastSync = 0; // la caja de Hoy se actualiza al volver a esa pantalla
@@ -1510,7 +1585,7 @@ function hojaEmpleados() {
 }
 
 function movimientoEditable(x) {
-  return x.Referencia !== 'CORTE' && x.Referencia.indexOf('DESC-') !== 0 && x.Tipo !== 'CAMBIO_MONEDA' && !x.OrdenID && !x.CuentaCobrarID;
+  return !x.Pendiente && x.Referencia !== 'CORTE' && x.Referencia.indexOf('DESC-') !== 0 && x.Tipo !== 'CAMBIO_MONEDA' && !x.OrdenID && !x.CuentaCobrarID;
 }
 
 function hojaMovimiento(id) {
@@ -1530,7 +1605,8 @@ function hojaMovimiento(id) {
     ${x.Notas ? `<p class="note">📝 ${esc(x.Notas)}</p>` : ''}
     <div class="actions">
       ${esDueno() && movimientoEditable(x) ? `<button type="button" class="btn block" data-act="editarMov" data-id="${x.ID}">Editar monto, fecha o nota</button>` : ''}
-      ${esDueno() && x.Referencia !== 'CORTE' ? `<button type="button" class="btn danger block" data-act="eliminarMov" data-id="${x.ID}" data-orden="${esc(x.OrdenID)}">Eliminar movimiento</button>` : ''}
+      ${x.Pendiente ? '<p class="note">⏳ Se está enviando. Podrás editarlo en un momento.</p>' : ''}
+      ${esDueno() && !x.Pendiente && x.Referencia !== 'CORTE' ? `<button type="button" class="btn danger block" data-act="eliminarMov" data-id="${x.ID}" data-orden="${esc(x.OrdenID)}">Eliminar movimiento</button>` : ''}
       <button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
 }
 
@@ -1648,6 +1724,31 @@ Object.assign(ACT, {
       return;
     }
     if (accion === 'corte' && !confirm('¿Guardar el corte al ' + fechaDia(datos.fecha) + '?')) return;
+    if (accion === 'gasto') {
+      const t = datos.moneda === 'VES' ? datos.tasa : 1;
+      const com = datos.moneda === 'VES' && datos.comision ? r2(datos.monto * pctComision() / 100) : 0;
+      const eqPago = datos.moneda === 'VES' ? datos.monto / t : datos.monto;
+      encolar({
+        accion: 'gasto',
+        etiqueta: 'el gasto de ' + datos.categoria,
+        datos,
+        idem: S.form.codigo,
+        efecto: {
+          bsTotal: datos.moneda === 'VES' ? r2(datos.monto + com) : 0,
+          eqTotal: r2(eqPago + (com ? com / t : 0)),
+          mov: {
+            ID: 'tmp-' + S.form.codigo, Fecha: datos.fecha, Tipo: datos.categoria === 'Retiro de socio' ? 'RETIRO_SOCIO' : 'EGRESO',
+            Categoria: datos.categoria, Persona: datos.persona || '', Moneda: datos.moneda, Monto: datos.monto,
+            EquivalenteUSD: -r2(eqPago), Medio: datos.moneda === 'VES' ? 'Pago móvil' : 'Efectivo', Referencia: '',
+            Notas: datos.notas || '', Usuario: '', OrdenID: '', CuentaCobrarID: '', Pendiente: true,
+          },
+        },
+      });
+      cerrarHoja();
+      if (S.view === 'dinero') render();
+      toast('Gasto registrado ✓');
+      return;
+    }
     const volver = S.form.volver;
     await conEspera(el, async () => {
       aplicarFinanzas(await api(accion, datos, S.form && S.form.codigo));
@@ -1858,37 +1959,26 @@ Object.assign(ACT, {
   },
   cobrarUna(el) { S.cobroMulti = null; abrirCobro(el.dataset.id); },
   cmModo(el) { S.cobroMulti.modo = el.dataset.m; pintarCobroMultiple(); },
-  async confirmarCobroMultiple(el) {
+  confirmarCobroMultiple() {
     const m = S.cobroMulti;
     const t = parseNum(m.tasa) > 0 ? parseNum(m.tasa) : null;
     if (m.modo === 'pm' && !t) { toast('Indique la tasa BCV.', true); return; }
     if (!confirm('¿Registrar el cobro de ' + m.ordenes.length + ' cotizaciones de ' + m.nombre + '?')) return;
-    el.disabled = true;
-    let hechas = 0;
-    try {
-      for (const o of m.ordenes) {
-        el.innerHTML = '<span class="spinner"></span> Cobrando ' + (hechas + 1) + ' de ' + m.ordenes.length;
-        const r = await api('cobrar', {
-          id: o.ID,
-          PagoMovilBs: m.modo === 'pm' ? r2(o.TotalUSD * t) : 0,
-          EfectivoUsd: m.modo === 'ef' ? o.TotalUSD : 0,
-          Fecha: m.fecha,
-          Tasa: m.modo === 'pm' ? t : '',
-          Referencia: '',
-        }, m.codigo + 'o' + o.ID);
-        aplicarEstado(r.estado);
-        hechas++;
-      }
-      cerrarHoja();
-      render();
-      toast(hechas + ' cotizaciones cobradas ✓');
-    } catch (e) {
-      render();
-      toast('Se cobraron ' + hechas + ' de ' + m.ordenes.length + '. ' + e.message, true);
-      if (el.isConnected) { el.disabled = false; el.textContent = 'Reintentar las que faltan'; }
-      m.ordenes = m.ordenes.slice(hechas);
-      m.total = r2(m.ordenes.reduce((s, o) => s + o.TotalUSD, 0));
-    }
+    // Cada cotización se envía por detrás, con su propio código para no duplicar.
+    m.ordenes.forEach((o) => {
+      const bsO = m.modo === 'pm' ? r2(o.TotalUSD * t) : 0;
+      const usO = m.modo === 'ef' ? o.TotalUSD : 0;
+      encolar({
+        accion: 'cobrar',
+        etiqueta: 'el cobro de ' + o.Numero,
+        datos: { id: o.ID, PagoMovilBs: bsO, EfectivoUsd: usO, Fecha: m.fecha, Tasa: m.modo === 'pm' ? t : '', Referencia: '' },
+        idem: m.codigo + 'o' + o.ID,
+        efecto: { id: o.ID, eq: o.TotalUSD, b: bsO, u: usO, completa: true },
+      });
+    });
+    cerrarHoja();
+    render();
+    toast(m.ordenes.length + ' cotizaciones cobradas ✓');
   },
 });
 
@@ -2022,6 +2112,447 @@ INP.edPrecio = function (el) {
 INP.edNotas = function (el) { S.edit.notas = el.value; };
 
 // -----------------------------------------------------------------------------
+// CRECER (etapa 4): clientes inactivos, fidelidad y promociones
+// -----------------------------------------------------------------------------
+
+const DIAS_CORTOS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+const DIAS_PLURAL = ['domingos', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábados'];
+
+function cfgCrecer() {
+  return (S.crecer && S.crecer.config) || (S.data && S.data.crecer && S.data.crecer.config) || null;
+}
+
+function progresoCliente(id) {
+  const p = S.data && S.data.crecer && S.data.crecer.progreso;
+  return (p && p[String(id)]) || 0;
+}
+
+function tienePremio(id) {
+  const cfg = cfgCrecer();
+  return Boolean(cfg && cfg.fidelidadCada > 0 && progresoCliente(id) >= cfg.fidelidadCada);
+}
+
+function promoHoy() {
+  const cfg = cfgCrecer();
+  return Boolean(cfg && cfg.promoPct > 0 && cfg.promoDias.includes(new Date().getDay()));
+}
+
+function listaDias(dias) {
+  const n = dias.map((d) => DIAS_PLURAL[d]);
+  return n.length > 1 ? n.slice(0, -1).join(', ') + ' y ' + n[n.length - 1] : (n[0] || '');
+}
+
+function textoPromoCorta() {
+  const cfg = cfgCrecer();
+  return cfg && cfg.promoDias.length && cfg.promoPct > 0
+    ? 'los ' + listaDias(cfg.promoDias) + ' tienen ' + cfg.promoPct + '% de descuento en todos nuestros servicios'
+    : '';
+}
+
+function mensajeInvitacion(c) {
+  const cfg = cfgCrecer();
+  const promo = textoPromoCorta();
+  return '¡Hola, Sr(a). ' + String(c.Nombre).trim() + '! Le saludamos de Autolavado Burbujas. 🫧\n' +
+    'Hace tiempo no lo vemos por aquí y nos encantaría consentir su vehículo de nuevo.' +
+    (promo ? '\n\nLe recordamos que ' + promo + '.' : '') +
+    (cfg && cfg.fidelidadCada && c.fidelidad ? '\n\n⭐ Ya lleva ' + c.fidelidad + ' de ' + cfg.fidelidadCada + ' lavados en nuestro programa de fidelidad.' : '') +
+    '\n\n¡Lo esperamos!';
+}
+
+function mensajePremio(c) {
+  const cfg = cfgCrecer();
+  return '¡Hola, Sr(a). ' + String(c.Nombre).trim() + '! 🎁 Gracias por su fidelidad: completó ' + cfg.fidelidadCada +
+    ' lavados con nosotros y su próximo lavado es GRATIS. Lo esperamos en Autolavado Burbujas. 🫧';
+}
+
+function mensajePromoPorDefecto() {
+  const promo = textoPromoCorta();
+  return '¡Hola, Sr(a). {nombre}! 🫧 En Autolavado Burbujas ' + (promo || 'tenemos una promoción especial para usted') +
+    '. ¡Lo esperamos!';
+}
+
+function contactadoHace(c) {
+  if (!c.ultimoContacto) return '';
+  const d = diasDesde(c.ultimoContacto);
+  const que = { inactivo: 'Invitado', premio: 'Avisado del premio', promo: 'Promoción enviada' }[c.motivoContacto] || 'Contactado';
+  return `<span class="badge ${d < 7 ? 'ok' : ''}">${que} ${d === 0 ? 'hoy' : hace(c.ultimoContacto)}</span>`;
+}
+
+function botonWa(c, texto, motivo, label) {
+  const tel = telWa(c.Telefono);
+  if (!tel) return '<span class="badge warn">Sin teléfono</span>';
+  return `<a class="btn wa-outline small" href="${waLink(tel, texto)}" target="_blank" rel="noopener" data-act="contactar" data-id="${c.ID}" data-motivo="${motivo}">${label}</a>`;
+}
+
+async function cargarCrecer() {
+  try {
+    S.crecer = await api('crecer');
+    if (S.data && S.data.crecer) S.data.crecer.config = S.crecer.config;
+    S.crecerError = '';
+  } catch (e) {
+    S.crecerError = e.message;
+  }
+  if (S.view === 'crecer') render();
+}
+
+function viewCrecer() {
+  let html = topbar('Crecer', 'Clientes, fidelidad y promociones') + `<main class="screen">
+    <button type="button" class="btn small ghost" data-act="nav" data-v="mas">‹ Volver</button>
+    <div class="segmented mt">
+      <button type="button" class="${S.crecerTab === 'inactivos' ? 'on' : ''}" data-act="crecerTab" data-v="inactivos">No vienen</button>
+      <button type="button" class="${S.crecerTab === 'fidelidad' ? 'on' : ''}" data-act="crecerTab" data-v="fidelidad">Fidelidad</button>
+      <button type="button" class="${S.crecerTab === 'promo' ? 'on' : ''}" data-act="crecerTab" data-v="promo">Promoción</button>
+    </div>`;
+
+  if (!S.crecer) {
+    return html + (S.crecerError
+      ? `<div class="empty"><p>${esc(S.crecerError)}</p><button type="button" class="btn primary" data-act="recargarCrecer">Reintentar</button></div>`
+      : '<div class="empty"><span class="spinner"></span><p>Cargando clientes…</p></div>') + '</main>';
+  }
+
+  const tabs = { inactivos: tabInactivos, fidelidad: tabFidelidad, promo: tabPromo };
+  return html + (tabs[S.crecerTab] || tabInactivos)() + '</main>';
+}
+
+function tabInactivos() {
+  const cfg = S.crecer.config;
+  const dias = S.inactDias || cfg.inactivoDias;
+  const todos = S.crecer.clientes
+    .filter((c) => c.diasSinVenir !== null && c.diasSinVenir >= dias)
+    .sort((a, b) => (b.visitas - a.visitas) || (b.totalUsd - a.totalUsd));
+  const porInvitar = todos.filter((c) => !c.ultimoContacto || diasDesde(c.ultimoContacto) >= 15);
+  const lista = S.inactFiltro === 'todos' ? todos : porInvitar;
+
+  let html = `<p class="note">Clientes que no vienen hace un tiempo, empezando por los más fieles. Invítalos con un toque.</p>
+    <div class="pills">${[30, 45, 60, 90].map((d) => `<button type="button" class="pill ${dias === d ? 'on' : ''}" data-act="inactDias" data-v="${d}">+${d} días</button>`).join('')}</div>
+    <div class="pills">
+      <button type="button" class="pill ${S.inactFiltro !== 'todos' ? 'on' : ''}" data-act="inactFiltro" data-v="invitar">Por invitar (${porInvitar.length})</button>
+      <button type="button" class="pill ${S.inactFiltro === 'todos' ? 'on' : ''}" data-act="inactFiltro" data-v="todos">Todos (${todos.length})</button>
+    </div>
+    <p class="note">"Por invitar" oculta a quienes contactaste en los últimos 15 días.</p>`;
+
+  if (!lista.length) return html + `<div class="empty">Nadie por invitar con más de ${dias} días sin venir. 🎉</div>`;
+
+  return html + lista.map((c) => `<article class="card">
+    <div class="card-row"><div><div class="name">${esc(c.Nombre)}</div>
+      <div class="meta">Última visita ${hace(c.ultimaVisita)} · ${c.visitas} visita(s) · ${usd(c.totalUsd)}</div>
+      <div class="pills" style="margin-top:6px">${contactadoHace(c)}</div></div></div>
+    <div class="actions">${botonWa(c, mensajeInvitacion(c), 'inactivo', 'Invitar por WhatsApp')}</div>
+  </article>`).join('');
+}
+
+function tabFidelidad() {
+  const cfg = S.crecer.config;
+  let html = `<div class="card"><div class="card-row"><div>
+      <div class="name">${cfg.fidelidadCada ? '1 lavado gratis cada ' + cfg.fidelidadCada + ' visitas' : 'Programa apagado'}</div>
+      <div class="meta">${cfg.fidelidadCada ? 'Cuentan las visitas pagadas desde el ' + fechaCorta(cfg.fidelidadDesde + 'T12:00:00') : 'Actívalo para premiar a tus clientes frecuentes.'}</div></div>
+      ${esDueno() ? '<button type="button" class="btn small" data-act="configCrecer">Configurar</button>' : ''}</div></div>`;
+  if (!cfg.fidelidadCada) return html;
+
+  const conPremio = S.crecer.clientes.filter((c) => c.premio);
+  const cerca = S.crecer.clientes
+    .filter((c) => !c.premio && c.fidelidad > 0)
+    .sort((a, b) => b.fidelidad - a.fidelidad).slice(0, 25);
+
+  html += `<h2 class="section">Tienen lavado gratis <span class="count">${conPremio.length}</span></h2>`;
+  html += conPremio.length ? conPremio.map((c) => `<article class="card">
+      <div class="name">🎁 ${esc(c.Nombre)}</div>
+      <div class="pills" style="margin-top:6px">${contactadoHace(c)}</div>
+      <div class="actions">${botonWa(c, mensajePremio(c), 'premio', 'Avisarle por WhatsApp')}</div></article>`).join('')
+    : '<div class="empty">Nadie ha completado el premio todavía.</div>';
+
+  html += '<h2 class="section">Avance de los clientes</h2>';
+  html += cerca.length ? cerca.map((c) => `<div class="cat-row"><div class="card-row"><span>${esc(c.Nombre)}</span>
+      <b>${c.fidelidad} de ${cfg.fidelidadCada}</b></div>
+      <div class="bar"><span style="width:${Math.round((c.fidelidad / cfg.fidelidadCada) * 100)}%"></span></div></div>`).join('')
+    : '<div class="empty">Las visitas pagadas desde el inicio del programa aparecerán aquí.</div>';
+  return html;
+}
+
+function tabPromo() {
+  const cfg = S.crecer.config;
+  const activa = cfg.promoDias.length && cfg.promoPct > 0;
+  let html = `<div class="card"><div class="card-row"><div>
+      <div class="name">${activa ? '−' + cfg.promoPct + '% los ' + esc(listaDias(cfg.promoDias)) : 'Sin promoción configurada'}</div>
+      <div class="meta">${activa ? 'Ese día, Nueva orden te ofrece aplicarla con un toque.' : 'Elige los días flojos y el descuento.'}</div></div>
+      ${esDueno() ? '<button type="button" class="btn small" data-act="configCrecer">Configurar</button>' : ''}</div></div>`;
+
+  if (S.promoMsg == null) S.promoMsg = mensajePromoPorDefecto();
+  const conTel = S.crecer.clientes.filter((c) => telWa(c.Telefono));
+  const recientes = conTel.filter((c) => c.diasSinVenir !== null && c.diasSinVenir <= 90);
+  const lista = (S.promoAud === 'todos' ? conTel : recientes)
+    .slice().sort((a, b) => (a.diasSinVenir == null ? 9999 : a.diasSinVenir) - (b.diasSinVenir == null ? 9999 : b.diasSinVenir));
+
+  html += `<h2 class="section">Enviar promoción</h2>
+    <label class="field">Mensaje ({nombre} se cambia por el nombre de cada cliente)
+      <textarea class="input" data-in="promoMsg" rows="4">${esc(S.promoMsg)}</textarea></label>
+    <button type="button" class="btn small ghost" data-act="promoMsgDefecto">Restaurar mensaje sugerido</button>
+    <div class="pills">
+      <button type="button" class="pill ${S.promoAud !== 'todos' ? 'on' : ''}" data-act="promoAud" data-v="recientes">Vinieron en 90 días (${recientes.length})</button>
+      <button type="button" class="pill ${S.promoAud === 'todos' ? 'on' : ''}" data-act="promoAud" data-v="todos">Todos con teléfono (${conTel.length})</button>
+    </div>
+    <p class="note">Se envía uno por uno desde tu WhatsApp, sin costo. Los ya enviados hoy quedan marcados.</p>`;
+
+  return html + lista.map((c) => {
+    const enviadaHoy = c.motivoContacto === 'promo' && c.ultimoContacto && diasDesde(c.ultimoContacto) === 0;
+    return `<div class="list-item" style="cursor:default;${enviadaHoy ? 'opacity:.55' : ''}"><div><div style="font-weight:600">${esc(c.Nombre)}</div>
+      <div class="meta">${c.ultimaVisita ? 'Última visita ' + hace(c.ultimaVisita) : 'Sin visitas'}${enviadaHoy ? ' · enviada hoy ✓' : ''}</div></div>
+      ${botonWa(c, S.promoMsg.replace(/\{nombre\}/g, String(c.Nombre).trim()), 'promo', 'Enviar')}</div>`;
+  }).join('');
+}
+
+function hojaConfigCrecer() {
+  const cfg = S.crecer.config;
+  S.cfgEdit = { dias: cfg.promoDias.slice() };
+  abrirHoja(`<h3>Configurar</h3>
+    <h2 class="section">Fidelidad</h2>
+    <label class="field">Lavado gratis cada (visitas pagadas, 0 = apagado)<input class="input" id="cc-cada" inputmode="numeric" value="${cfg.fidelidadCada}"></label>
+    <label class="field">Contar visitas desde<input class="input" id="cc-desde" type="date" value="${esc(cfg.fidelidadDesde)}"></label>
+    <p class="note">Si eliges una fecha anterior, los clientes acumulan también sus visitas pasadas.</p>
+    <h2 class="section">Promoción</h2>
+    <div class="pills" id="cc-dias">${DIAS_CORTOS.map((d, i) => `<button type="button" class="pill ${cfg.promoDias.includes(i) ? 'on' : ''}" data-act="ccDia" data-v="${i}">${d}</button>`).join('')}</div>
+    <label class="field">Descuento (%)<input class="input" id="cc-pct" inputmode="decimal" value="${cfg.promoPct}"></label>
+    <h2 class="section">Clientes inactivos</h2>
+    <label class="field">Días sin venir para considerarlo inactivo<input class="input" id="cc-inact" inputmode="numeric" value="${cfg.inactivoDias}"></label>
+    <div class="actions"><button type="button" class="btn primary block" data-act="guardarConfigCrecer">Guardar</button>
+    <button type="button" class="btn ghost block" data-act="cerrarHoja">Cancelar</button></div>`);
+}
+
+Object.assign(ACT, {
+  crecerTab(el) { S.crecerTab = el.dataset.v; render(); },
+  recargarCrecer() { S.crecerError = ''; render(); cargarCrecer(); },
+  inactDias(el) { S.inactDias = Number(el.dataset.v); render(); },
+  inactFiltro(el) { S.inactFiltro = el.dataset.v; render(); },
+  promoAud(el) { S.promoAud = el.dataset.v; render(); },
+  promoMsgDefecto() { S.promoMsg = mensajePromoPorDefecto(); render(); },
+  contactar(el) {
+    // El enlace abre WhatsApp; aquí solo se anota el contacto.
+    const c = S.crecer && S.crecer.clientes.find((x) => String(x.ID) === String(el.dataset.id));
+    if (c) { c.ultimoContacto = new Date().toISOString(); c.motivoContacto = el.dataset.motivo; }
+    setTimeout(() => { if (S.view === 'crecer') render(); }, 400);
+    api('contacto', { ids: [el.dataset.id], motivo: el.dataset.motivo })
+      .catch((e) => toast('No se pudo anotar el contacto: ' + e.message, true));
+  },
+  configCrecer() { hojaConfigCrecer(); },
+  ccDia(el) {
+    const d = Number(el.dataset.v);
+    const i = S.cfgEdit.dias.indexOf(d);
+    if (i >= 0) S.cfgEdit.dias.splice(i, 1); else S.cfgEdit.dias.push(d);
+    el.classList.toggle('on');
+  },
+  async guardarConfigCrecer(el) {
+    const datos = {
+      fidelidadCada: parseNum(document.getElementById('cc-cada').value),
+      fidelidadDesde: document.getElementById('cc-desde').value,
+      promoDias: S.cfgEdit.dias.sort(),
+      promoPct: parseNum(document.getElementById('cc-pct').value),
+      inactivoDias: parseNum(document.getElementById('cc-inact').value),
+    };
+    await conEspera(el, async () => {
+      S.crecer = await api('configCrecer', datos);
+      S.promoMsg = null;
+      cerrarHoja();
+      render();
+      toast('Configuración guardada ✓');
+      sync(true); // actualizar el avance de fidelidad en Nueva orden
+    });
+  },
+
+  // Nueva orden: premio y promoción
+  usarPremio() {
+    const d = S.draft;
+    d.premio = !d.premio;
+    if (d.premio) aplicarPremioBorrador();
+    else if (d.premioId && d.sel[d.premioId]) {
+      const s = S.data.catalogo.find((x) => String(x.ID) === String(d.premioId));
+      d.sel[d.premioId] = { precio: precioConPromo(s), cortesia: false };
+      d.premioId = null;
+    }
+    guardarBorrador(); render();
+  },
+  aplicarPromo() {
+    const d = S.draft;
+    d.promo = !d.promo;
+    Object.keys(d.sel).forEach((id) => {
+      if (d.sel[id].cortesia) return;
+      const s = S.data.catalogo.find((x) => String(x.ID) === String(id));
+      if (s) d.sel[id].precio = precioConPromo(s);
+    });
+    guardarBorrador(); render();
+  },
+});
+
+INP.promoMsg = function (el) { S.promoMsg = el.value; };
+
+function precioConPromo(s) {
+  const cfg = cfgCrecer();
+  return S.draft.promo && cfg ? r2(s.Precio_USD * (1 - cfg.promoPct / 100)) : s.Precio_USD;
+}
+
+/** El premio se aplica al primer lavado elegido (o al servicio más caro). */
+function aplicarPremioBorrador() {
+  const d = S.draft;
+  if (!d.premio || (d.premioId && d.sel[d.premioId])) return;
+  const elegidos = Object.keys(d.sel).map((id) => S.data.catalogo.find((x) => String(x.ID) === String(id))).filter(Boolean);
+  const lavado = elegidos.find((s) => /lavado/i.test(s.Nombre)) ||
+    elegidos.sort((a, b) => b.Precio_USD - a.Precio_USD)[0];
+  if (lavado) {
+    d.sel[lavado.ID] = { precio: 0, cortesia: true };
+    d.premioId = lavado.ID;
+  }
+}
+
+function bloqueCrecerNueva(c) {
+  const cfg = cfgCrecer();
+  if (!cfg) return '';
+  let html = '';
+  if (cfg.fidelidadCada > 0) {
+    if (tienePremio(c.ID)) {
+      html += `<div class="card mt" style="border-color:var(--ok)"><div class="card-row"><div><div class="name">🎁 Tiene un lavado gratis</div>
+        <div class="meta">${S.draft.premio ? (S.draft.premioId ? 'Se aplicará como cortesía en esta orden.' : 'Elija el lavado y se marcará como cortesía.') : 'Completó ' + cfg.fidelidadCada + ' visitas.'}</div></div>
+        <button type="button" class="btn small ${S.draft.premio ? 'ok' : ''}" data-act="usarPremio">${S.draft.premio ? 'Usando ✓' : 'Usar ahora'}</button></div></div>`;
+    } else if (progresoCliente(c.ID) > 0) {
+      html += `<p class="note">⭐ Fidelidad: ${progresoCliente(c.ID)} de ${cfg.fidelidadCada} visitas</p>`;
+    }
+  }
+  if (promoHoy()) {
+    html += `<div class="card mt"><div class="card-row"><div><div class="name">🏷️ Hoy hay promoción: −${cfg.promoPct}%</div>
+      <div class="meta">${S.draft.promo ? 'Aplicada a los servicios elegidos.' : 'Toque para aplicar el descuento.'}</div></div>
+      <button type="button" class="btn small ${S.draft.promo ? 'ok' : ''}" data-act="aplicarPromo">${S.draft.promo ? 'Aplicada ✓' : 'Aplicar'}</button></div></div>`;
+  }
+  return html;
+}
+
+// -----------------------------------------------------------------------------
+// COLA DE ENVÍOS: órdenes, cobros y gastos se muestran al instante y se envían
+// por detrás. Si la señal falla, se reintentan solos (el código único evita
+// duplicados). Si el servidor rechaza uno, se avisa y se recargan los datos.
+// -----------------------------------------------------------------------------
+
+function guardarCola() {
+  ls.set(K.cola, JSON.stringify(S.cola));
+}
+
+function encolar(item) {
+  item.idem = item.idem || nuevoCodigo();
+  item.creado = Date.now();
+  S.cola.push(item);
+  guardarCola();
+  aplicarOptimista(item);
+  pintarSync();
+  procesarCola();
+}
+
+/** Efecto local de un envío pendiente (se vuelve a aplicar tras cada recarga). */
+function aplicarOptimista(it) {
+  const e = it.efecto || {};
+  if (it.accion === 'crearOrden' && S.data) {
+    const lista = S.data.enProceso || (S.data.enProceso = []);
+    if (!lista.some((o) => o.ID === e.orden.ID)) lista.push(Object.assign({}, e.orden));
+  }
+  if (it.accion === 'cobrar' && S.data) {
+    const o = (S.data.pendientes || []).find((p) => String(p.ID) === String(e.id));
+    if (!o) return; // el servidor ya lo procesó
+    if (e.completa) S.data.pendientes = S.data.pendientes.filter((p) => p !== o);
+    else {
+      o.AbonadoUSD = r2((o.AbonadoUSD || 0) + e.eq);
+      o.SaldoUSD = r2(o.TotalUSD - o.AbonadoUSD);
+    }
+    if (S.data.caja) {
+      const c = S.data.caja;
+      c.cobros++;
+      c.cobradoUsd = r2(c.cobradoUsd + e.eq);
+      c.pagoMovilBs = r2(c.pagoMovilBs + e.b);
+      c.efectivoUsd = r2(c.efectivoUsd + e.u);
+    }
+  }
+  if (it.accion === 'gasto' && S.fin) {
+    if (S.fin.movimientos.some((m) => m.ID === e.mov.ID)) return;
+    S.fin.movimientos.unshift(Object.assign({}, e.mov));
+    const s = S.fin.saldos;
+    if (e.mov.Moneda === 'VES') s.bancoBs = r2(s.bancoBs - e.bsTotal);
+    else s.efectivoUsd = r2(s.efectivoUsd - e.mov.Monto);
+    s.totalUsd = r2(s.totalUsd - e.eqTotal);
+    if (S.fin.mes.clave === e.mov.Fecha.slice(0, 7) && e.mov.Tipo === 'EGRESO') {
+      S.fin.mes.gastosUsd = r2(S.fin.mes.gastosUsd + e.eqTotal);
+      S.fin.mes.gananciaUsd = r2(S.fin.mes.gananciaUsd - e.eqTotal);
+    }
+  }
+}
+
+function reaplicarOptimistas() {
+  S.cola.forEach(aplicarOptimista);
+}
+
+/** Qué hacer con la respuesta del servidor de cada tipo de envío. */
+const AL_CONFIRMAR = {
+  crearOrden(r) { aplicarEstado(r.estado); },
+  cobrar(r) { aplicarEstado(r.estado); S.lastFull = 0; },
+  gasto(r) { aplicarFinanzas(r); },
+};
+
+let reintentoCola = null;
+
+async function procesarCola() {
+  if (S.enviando || !S.cola.length || !ls.get(K.token)) return;
+  S.enviando = true;
+  pintarSync();
+
+  try {
+    while (S.cola.length) {
+      const it = S.cola[0];
+      try {
+        const r = await api(it.accion, it.datos, it.idem);
+        S.cola.shift();
+        guardarCola();
+        if (AL_CONFIRMAR[it.accion]) AL_CONFIRMAR[it.accion](r);
+        reaplicarOptimistas();
+        if (S.view === 'hoy' || S.view === 'dinero' || S.view === 'cobranza') render();
+      } catch (e) {
+        if (e.red || e.auth) {
+          // Sin señal (o sesión vencida): se queda en la cola y se reintenta.
+          if (!reintentoCola) reintentoCola = setTimeout(() => { reintentoCola = null; procesarCola(); }, 15000);
+          break;
+        }
+        // El servidor lo rechazó: se descarta, se avisa y se recarga la verdad.
+        S.cola.shift();
+        guardarCola();
+        toast('No se pudo guardar ' + it.etiqueta + ': ' + e.message, true);
+        S.enviando = false;
+        await sync(true, true);
+        if (S.view === 'dinero') cargarFinanzas();
+        S.enviando = true;
+      }
+    }
+  } finally {
+    S.enviando = false;
+    pintarSync();
+  }
+}
+
+window.addEventListener('online', () => procesarCola());
+
+// Tiempos de respuesta (Más → Velocidad).
+function registrarTiempo(accion, ms, ok) {
+  S.tiempos.unshift({ accion, ms: Math.round(ms), ok, hora: Date.now() });
+  S.tiempos = S.tiempos.slice(0, 25);
+}
+
+function velocidadHTML() {
+  if (!S.tiempos.length) return '<div class="meta">Todavía no hay mediciones. Usa la app un momento y vuelve aquí.</div>';
+  const oks = S.tiempos.filter((t) => t.ok);
+  const prom = oks.length ? oks.reduce((s, t) => s + t.ms, 0) / oks.length : 0;
+  const nombres = {
+    bootstrap: 'Cargar todo', estado: 'Actualizar Hoy', finanzas: 'Dinero', crearOrden: 'Registrar orden',
+    finalizarOrden: 'Finalizar', cobrar: 'Cobrar', gasto: 'Gasto', crecer: 'Crecer', clienteDetalle: 'Ficha cliente',
+  };
+  return `<div class="card-row"><span>Promedio</span><b>${(prom / 1000).toFixed(1)} s</b></div>` +
+    S.tiempos.slice(0, 8).map((t) => `<div class="card-row meta" style="padding:2px 0"><span>${esc(nombres[t.accion] || t.accion)}</span>
+      <span>${t.ok ? (t.ms / 1000).toFixed(1) + ' s' : 'falló'}</span></div>`).join('') +
+    `<p class="note">Menos de 2 s es bueno. Si casi todo pasa de 4 s, el problema suele ser la señal.</p>`;
+}
+
+// -----------------------------------------------------------------------------
 // Inicio
 // -----------------------------------------------------------------------------
 
@@ -2030,9 +2561,14 @@ INP.edNotas = function (el) { S.edit.notas = el.value; };
   normalizarPendientes(S.data);
   S.draft = Object.assign(borradorVacio(), ls.json(K.draft, {}));
   S.fin = ls.json(K.fin, null);
+  S.cola = ls.json(K.cola, []);
+  reaplicarOptimistas();
   S.finMes = S.fin ? S.fin.mes.clave : '';
   render();
-  if (ls.get(K.url) && ls.get(K.token)) sync(true);
+  if (ls.get(K.url) && ls.get(K.token)) {
+    procesarCola();
+    sync(true);
+  }
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(() => { /* sin modo sin conexión */ });
   }
