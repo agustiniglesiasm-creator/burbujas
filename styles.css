@@ -274,3 +274,9 @@ textarea.input { min-height: 72px; resize: vertical; }
 .hist-row > :first-child { text-align: left; text-transform: capitalize; }
 .hist-row:last-child { border-bottom: 0; font-size: 12px; }
 .btn.wa-outline { background: var(--surface); border-color: var(--wa); color: var(--wa); }
+
+/* Dinero: botones de acciones */
+.acciones-dinero { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.acciones-dinero .btn { padding: 10px 6px; font-size: 14px; }
+.hist-row.cierre > :first-child { text-transform: none; }
+.hist-row.cierre > :not(:first-child) { white-space: nowrap; font-size: 13px; }

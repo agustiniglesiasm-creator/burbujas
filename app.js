@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 const K = {
   url: 'bur_api',
@@ -56,6 +56,9 @@ const S = {
   cola: [],
   enviando: false,
   tiempos: [],
+  cierre: null,
+  cierreFecha: '',
+  cierreReal: null,
 };
 
 // -----------------------------------------------------------------------------
@@ -1305,9 +1308,13 @@ function viewDinero() {
     </div>`;
   }
 
-  html += `<div class="row2 mt">
+  html += `<div class="acciones-dinero mt">
     <button type="button" class="btn primary" data-act="hojaGasto">+ Gasto</button>
-    <button type="button" class="btn" data-act="hojaEmpleados">Empleados</button></div>`;
+    <button type="button" class="btn" data-act="hojaIngreso">+ Ingreso</button>
+    <button type="button" class="btn" data-act="hojaCambio">Cambio $ ⇄ Bs</button>
+    <button type="button" class="btn" data-act="hojaEmpleados">Empleados</button>
+    <button type="button" class="btn" data-act="hojaSocios">Socios</button>
+    <button type="button" class="btn" data-act="hojaCierre">Cierre del día</button></div>`;
 
   const m = f.mes;
   const esMesActual = m.clave >= f.hoy.slice(0, 7);
@@ -1316,9 +1323,9 @@ function viewDinero() {
     <button type="button" class="btn small" data-act="mesCambio" data-d="1" ${esMesActual ? 'disabled' : ''} aria-label="Mes siguiente">›</button></div>`;
 
   html += `<div class="kpis">
-    <div class="kpi"><div class="label">Ventas</div><div class="value">${usd(m.ventasUsd)}</div><div class="hint">${m.cobros} cobro(s)</div></div>
+    <div class="kpi"><div class="label">Ventas</div><div class="value">${usd(m.ventasUsd)}</div><div class="hint">${m.cobros} cobro(s)${m.otrosIngresosUsd ? ' · otros ingresos ' + usd(m.otrosIngresosUsd) : ''}</div></div>
     <div class="kpi"><div class="label">Gastos</div><div class="value">${usd(m.gastosUsd)}</div></div>
-    <div class="kpi wide"><div class="label">Ganancia (ventas − gastos)</div>
+    <div class="kpi wide"><div class="label">Ganancia (ventas${m.otrosIngresosUsd ? ' + otros ingresos' : ''} − gastos)</div>
       <div class="value" style="color:var(${m.gananciaUsd >= 0 ? '--ok' : '--danger'})">${usd(m.gananciaUsd)}</div>
       ${m.retirosUsd ? `<div class="hint">Retiros de socio: ${usd(m.retirosUsd)} (no se restan de la ganancia)</div>` : ''}</div>
   </div>`;
@@ -1397,7 +1404,9 @@ function botonesForm(label) {
 /** ¿Este formulario es una salida por pago móvil que paga comisión? */
 function comisionAplica() {
   const f = S.form;
+  if (f.hoja === 'cambio') return f.direccion === 'compra';
   if (f.moneda !== 'VES') return false;
+  if (f.hoja === 'socio') return f.modo === 'prestar';
   if (f.hoja === 'gasto') return f.categoria !== 'Comisión bancaria';
   return f.hoja === 'adelanto' || f.hoja === 'pagar' || (f.hoja === 'deuda' && f.modo === 'prestar');
 }
@@ -1410,7 +1419,7 @@ function pctComision() {
 function bsSalientes() {
   const f = S.form;
   const t = fNum('tasa');
-  if (f.hoja === 'gasto') return fNum('monto') || 0;
+  if (f.hoja === 'gasto' || f.hoja === 'socio') return fNum('monto') || 0;
   if (fNum('montoBs') > 0) return fNum('montoBs');
   if (!(t > 0)) return 0;
   if (f.hoja === 'pagar') return Math.max(0, netoSemana()) * t;
@@ -1456,8 +1465,15 @@ function eqFormBaseHTML() {
   }
   const redondeo = f.moneda === 'VES' && t > 0 && fNum('montoBs') > 0
     ? `<p class="note check">Entrega ${bs(fNum('montoBs'))} (≈ ${usd(fNum('montoBs') / t)})</p>` : '';
-  if (f.hoja === 'movimiento') {
+  if (f.hoja === 'movimiento' || f.hoja === 'ingreso' || f.hoja === 'socio') {
     return f.moneda === 'VES' && t > 0 && fNum('monto') > 0 ? `<p class="note">≈ ${usd(fNum('monto') / t)}</p>` : '';
+  }
+  if (f.hoja === 'cambio') {
+    const u = fNum('montoUsd');
+    const b = fNum('montoBs');
+    const bcv = (S.fin && S.fin.tasaHoy) || tasaHoy();
+    return u > 0 && b > 0
+      ? `<p class="note check">Tasa del cambio: ${nf2.format(b / u)} Bs por dólar${bcv ? ' · BCV hoy: ' + nf2.format(bcv) : ''}</p>` : '';
   }
   if (f.hoja === 'adelanto' && redondeo) return redondeo;
   if (f.hoja === 'pagar' && redondeo && netoSemana() >= 0) {
@@ -1618,15 +1634,31 @@ const MENSAJES_FIN = {
   deuda: 'Deuda actualizada ✓',
   empleadoGuardar: 'Empleado guardado ✓',
   editarMovimiento: 'Movimiento actualizado ✓',
+  ingreso: 'Ingreso registrado ✓',
+  cambio: 'Cambio registrado ✓',
+  prestamoSocio: 'Registrado ✓',
 };
 
 function datosForm() {
   const f = S.form;
   const tasa = f.moneda === 'VES' ? fNum('tasa') : '';
   const base = { fecha: f.fecha, moneda: f.moneda, tasa, mes: S.finMes, comision: comisionAplica() && f.comision !== false };
-  const usaTasa = f.moneda === 'VES' && (['gasto', 'adelanto', 'pagar', 'movimiento'].includes(f.hoja) || (f.hoja === 'deuda' && f.modo === 'prestar'));
+  const usaTasa = f.moneda === 'VES' && (['gasto', 'adelanto', 'pagar', 'movimiento', 'ingreso', 'socio'].includes(f.hoja) || (f.hoja === 'deuda' && f.modo === 'prestar'));
   if (usaTasa && !(tasa > 0)) throw new Error('Indique la tasa BCV.');
 
+  if (f.hoja === 'ingreso') {
+    if (!(fNum('monto') > 0)) throw new Error('Indique el monto.');
+    return ['ingreso', Object.assign(base, { categoria: f.categoria, monto: fNum('monto'), persona: f.persona, notas: f.notas })];
+  }
+  if (f.hoja === 'cambio') {
+    if (!(fNum('montoUsd') > 0) || !(fNum('montoBs') > 0)) throw new Error('Indique los dólares y los bolívares del cambio.');
+    return ['cambio', Object.assign(base, { direccion: f.direccion, montoUsd: fNum('montoUsd'), montoBs: fNum('montoBs'), persona: f.persona, notas: f.notas })];
+  }
+  if (f.hoja === 'socio') {
+    if (!String(f.persona || '').trim()) throw new Error('Indique el nombre del socio.');
+    if (!(fNum('monto') > 0)) throw new Error('Indique el monto.');
+    return ['prestamoSocio', Object.assign(base, { modo: f.modo, persona: f.persona, monto: fNum('monto'), notas: f.notas })];
+  }
   if (f.hoja === 'movimiento') {
     if (!(fNum('monto') > 0)) throw new Error('Indique el monto.');
     return ['editarMovimiento', { id: f.movId, monto: fNum('monto'), fecha: f.fecha, tasa, notas: f.notas, mes: S.finMes }];
@@ -1750,9 +1782,10 @@ Object.assign(ACT, {
       return;
     }
     const volver = S.form.volver;
+    const volverSocios = S.form.volverSocios;
     await conEspera(el, async () => {
       aplicarFinanzas(await api(accion, datos, S.form && S.form.codigo));
-      if (volver) hojaEmpleados(); else cerrarHoja();
+      if (volver) hojaEmpleados(); else if (volverSocios) hojaSocios(); else cerrarHoja();
       toast(MENSAJES_FIN[accion]);
     });
   },
@@ -2551,6 +2584,164 @@ function velocidadHTML() {
       <span>${t.ok ? (t.ms / 1000).toFixed(1) + ' s' : 'falló'}</span></div>`).join('') +
     `<p class="note">Menos de 2 s es bueno. Si casi todo pasa de 4 s, el problema suele ser la señal.</p>`;
 }
+
+// -----------------------------------------------------------------------------
+// CUENTAS: otros ingresos, cambio de moneda, préstamos a socios y cierre del día
+// -----------------------------------------------------------------------------
+
+Object.assign(HOJAS_FORM, {
+  ingreso(f) {
+    const pill = (c) => `<button type="button" class="pill ${f.categoria === c ? 'on' : ''}" data-act="fSet" data-k="categoria" data-v="${esc(c)}">${esc(c)}</button>`;
+    return `<h3>Registrar ingreso</h3><div class="sub">Dinero que entra y no es un servicio de lavado.</div>
+      <div class="pills">${['Venta de producto', 'Otro ingreso'].map(pill).join('')}</div>
+      ${monedaHTML()}
+      ${campo(f.moneda === 'VES' ? 'Monto (Bs)' : 'Monto ($)', 'monto')}
+      ${fechaTasaHTML()}
+      ${campo('De quién (opcional)', 'persona', 'autocomplete="off"')}
+      ${campo('Nota (opcional)', 'notas', 'autocomplete="off"')}
+      ${botonesForm('Guardar ingreso')}`;
+  },
+  cambio(f) {
+    return `<h3>Cambio de moneda</h3>
+      <div class="segmented two">
+        <button type="button" class="${f.direccion === 'vende' ? 'on' : ''}" data-act="fSet" data-k="direccion" data-v="vende">Vendí dólares</button>
+        <button type="button" class="${f.direccion === 'compra' ? 'on' : ''}" data-act="fSet" data-k="direccion" data-v="compra">Compré dólares</button></div>
+      <p class="note">${f.direccion === 'vende'
+        ? 'Entregaste dólares en efectivo y recibiste bolívares en el banco.'
+        : 'Pagaste bolívares desde el banco y recibiste dólares en efectivo.'}</p>
+      <div class="row2">${campo(f.direccion === 'vende' ? 'Dólares que entregaste' : 'Dólares que recibiste', 'montoUsd')}
+        ${campo(f.direccion === 'vende' ? 'Bs que recibiste' : 'Bs que pagaste', 'montoBs')}</div>
+      <label class="field">Fecha<input class="input" type="date" data-ch="fFecha" value="${esc(f.fecha)}" max="${esc(hoyISO())}"></label>
+      ${campo('Con quién (opcional)', 'persona', 'autocomplete="off"')}
+      ${campo('Nota (opcional)', 'notas', 'autocomplete="off"')}
+      ${comisionHTML()}
+      ${botonesForm('Guardar cambio')}`;
+  },
+  socio(f) {
+    return `<h3>${f.modo === 'devolver' ? 'Devolución de socio' : 'Préstamo a socio'}</h3>
+      <div class="segmented two">
+        <button type="button" class="${f.modo === 'prestar' ? 'on' : ''}" data-act="fSet" data-k="modo" data-v="prestar">Le presto</button>
+        <button type="button" class="${f.modo === 'devolver' ? 'on' : ''}" data-act="fSet" data-k="modo" data-v="devolver">Me devuelve</button></div>
+      ${campo('Socio', 'persona', 'autocomplete="off"')}
+      ${monedaHTML()}
+      ${campo(f.moneda === 'VES' ? 'Monto (Bs)' : 'Monto ($)', 'monto')}
+      ${fechaTasaHTML()}
+      ${campo('Nota (opcional)', 'notas', 'autocomplete="off"')}
+      ${comisionHTML()}
+      ${botonesForm('Guardar')}`;
+  },
+});
+
+function hojaSocios() {
+  S.form = null;
+  const lista = (S.fin && S.fin.socios) || [];
+  abrirHoja(`<h3>Préstamos a socios</h3>
+    <div class="sub">Lo que el negocio le prestó a cada socio y todavía no ha devuelto.</div>
+    ${lista.length ? lista.map((s) => `<div class="card">
+      <div class="card-row"><div class="name">${esc(s.persona)}</div>
+        <span class="badge ${s.deudaUsd > 0 ? 'warn' : 'ok'}">${s.deudaUsd > 0 ? 'Debe ' + usd(s.deudaUsd) : 'A favor ' + usd(-s.deudaUsd)}</span></div>
+      <div class="actions">
+        <button type="button" class="btn" data-act="hojaSocio" data-modo="prestar" data-p="${esc(s.persona)}">Prestar más</button>
+        <button type="button" class="btn ok" data-act="hojaSocio" data-modo="devolver" data-p="${esc(s.persona)}">Devolución</button></div>
+    </div>`).join('') : '<div class="empty">No hay préstamos pendientes.</div>'}
+    <p class="note">Incluye préstamos anteriores al corte. Si uno ya se devolvió fuera de la app, regístralo como devolución.</p>
+    <div class="actions"><button type="button" class="btn primary block" data-act="hojaSocio" data-modo="prestar" data-p="">+ Nuevo préstamo</button>
+    <button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+// --- Cierre del día ---
+
+async function abrirCierre(fecha) {
+  S.cierreFecha = fecha || hoyISO();
+  S.cierreReal = { banco: '', efectivo: '', motivo: '' };
+  abrirHoja('<h3>Cierre del día</h3><div class="empty"><span class="spinner"></span></div>');
+  try {
+    S.cierre = await api('cierre', { fecha: S.cierreFecha });
+    pintarCierre();
+  } catch (e) {
+    abrirHoja(`<h3>Cierre del día</h3><div class="empty">${esc(e.message)}</div>
+      <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+  }
+}
+
+function signo(n, fmt) {
+  if (Math.abs(n) < 0.005) return '<span class="muted">—</span>';
+  return `<span style="color:var(${n > 0 ? '--ok' : '--text'})">${n > 0 ? '+' : '−'} ${fmt(Math.abs(n))}</span>`;
+}
+
+function diferenciaCierreHTML() {
+  const c = S.cierre;
+  const r = S.cierreReal;
+  const fila = (real, calc, fmt, cuenta) => {
+    if (r[real] === '') return '';
+    const d = r2(parseNum(r[real]) - calc);
+    if (isNaN(d)) return '';
+    if (Math.abs(d) < 0.01) return `<p class="note check">✓ ${cuenta} cuadra exacto.</p>`;
+    return `<p class="note warn">${cuenta}: ${d > 0 ? 'hay ' + fmt(d) + ' de más' : 'faltan ' + fmt(-d)}.</p>`;
+  };
+  return fila('banco', c.final.bancoBs, bs, 'El banco') + fila('efectivo', c.final.efectivoUsd, usd, 'La caja');
+}
+
+function pintarCierre() {
+  const c = S.cierre;
+  const r = S.cierreReal;
+  const esHoy = c.fecha === hoyISO();
+  abrirHoja(`<h3>Cierre del día</h3>
+    <label class="field">Día<input class="input" type="date" data-ch="cierreFecha" value="${esc(c.fecha)}" min="${esc(c.corte)}" max="${esc(hoyISO())}"></label>
+    <div class="card mt" style="padding:6px 12px">
+      <div class="hist-row cierre" style="grid-template-columns:1.6fr 1fr 1fr"><span></span><span>Banco</span><span>Efectivo</span></div>
+      <div class="hist-row cierre" style="grid-template-columns:1.6fr 1fr 1fr"><span>Al empezar el día</span><span>${bs(c.inicial.bancoBs)}</span><span>${usd(c.inicial.efectivoUsd)}</span></div>
+      ${c.grupos.map((g) => `<div class="hist-row cierre" style="grid-template-columns:1.6fr 1fr 1fr"><span>${esc(g.nombre)}</span>
+        <span>${signo(g.bancoBs, bs)}</span><span>${signo(g.efectivoUsd, usd)}</span></div>`).join('') ||
+        '<div class="hist-row" style="grid-template-columns:1fr"><span class="muted">Sin movimientos este día.</span></div>'}
+      <div class="hist-row cierre" style="grid-template-columns:1.6fr 1fr 1fr;font-weight:700"><span>${esHoy ? 'Debería haber ahora' : 'Al cerrar el día'}</span>
+        <span>${bs(c.final.bancoBs)}</span><span>${usd(c.final.efectivoUsd)}</span></div>
+    </div>
+    <h2 class="section">¿Cuánto hay en realidad?</h2>
+    <div class="row2">
+      <label class="field">Banco (Bs)<input class="input" inputmode="decimal" data-in="cierreReal" data-k="banco" value="${esc(r.banco)}" placeholder="${fmtIn(c.final.bancoBs)}"></label>
+      <label class="field">Efectivo ($)<input class="input" inputmode="decimal" data-in="cierreReal" data-k="efectivo" value="${esc(r.efectivo)}" placeholder="${fmtIn(c.final.efectivoUsd)}"></label>
+    </div>
+    <div id="cierre-dif">${diferenciaCierreHTML()}</div>
+    ${esDueno() ? `<label class="field">Motivo del ajuste (opcional)<input class="input" data-in="cierreReal" data-k="motivo" value="${esc(r.motivo)}" placeholder="Ej. comisión no registrada" autocomplete="off"></label>
+      <div class="row2 mt">
+        <button type="button" class="btn" data-act="ajustarCuenta" data-cuenta="banco">Ajustar banco</button>
+        <button type="button" class="btn" data-act="ajustarCuenta" data-cuenta="efectivo">Ajustar efectivo</button></div>
+      <p class="note">Ajustar deja el saldo igual al real y anota la diferencia como "Ajuste". Úsalo solo si no encuentras el motivo.</p>` : ''}
+    <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+Object.assign(ACT, {
+  hojaIngreso() { nuevoForm('ingreso', { categoria: 'Venta de producto', monto: '', persona: '', notas: '' }); },
+  hojaCambio() { nuevoForm('cambio', { direccion: 'vende', montoUsd: '', montoBs: '', persona: '', notas: '' }); },
+  hojaSocios() { hojaSocios(); },
+  hojaSocio(el) {
+    nuevoForm('socio', { modo: el.dataset.modo, persona: el.dataset.p || '', monto: '', notas: '', volverSocios: true });
+  },
+  hojaCierre() { abrirCierre(); },
+  async ajustarCuenta(el) {
+    const cuenta = el.dataset.cuenta;
+    const valor = S.cierreReal[cuenta];
+    if (valor === '' || isNaN(parseNum(valor))) { toast('Escriba primero cuánto hay en ' + (cuenta === 'banco' ? 'el banco.' : 'la caja.'), true); return; }
+    if (!confirm('¿Ajustar ' + (cuenta === 'banco' ? 'el banco' : 'el efectivo') + ' al saldo real?')) return;
+    await conEspera(el, async () => {
+      const r = await api('ajusteSaldo', { cuenta, saldoReal: parseNum(valor), fecha: S.cierre.fecha, motivo: S.cierreReal.motivo });
+      S.cierre = r.cierre;
+      S.cierreReal[cuenta] = '';
+      pintarCierre();
+      toast(Math.abs(r.diferencia) < 0.01 ? 'Ya cuadraba, no hizo falta ajustar' : 'Ajuste registrado ✓');
+      cargarFinanzas();
+    });
+  },
+});
+
+INP.cierreReal = function (el) {
+  S.cierreReal[el.dataset.k] = el.value;
+  const d = document.getElementById('cierre-dif');
+  if (d) d.innerHTML = diferenciaCierreHTML();
+};
+
+CH.cierreFecha = function (el) { if (el.value) abrirCierre(el.value); };
 
 // -----------------------------------------------------------------------------
 // Inicio
