@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.10.0';
 
 const K = {
   url: 'bur_api',
@@ -808,6 +808,7 @@ function viewMas() {
     ${old ? `<a class="list-item" href="${esc(old)}" target="_blank" rel="noopener"><span>Finanzas y resúmenes (app anterior)</span><span class="meta">↗</span></a>` : ''}
     <button type="button" class="list-item" data-act="appAnterior"><span>${old ? 'Cambiar enlace de la app anterior' : 'Enlazar la app anterior (finanzas)'}</span><span class="meta">›</span></button>
     <button type="button" class="list-item" data-act="nav" data-v="cobranza"><span>Cobranza</span><span class="meta">›</span></button>
+    ${esDueno() ? '<button type="button" class="list-item" data-act="hojaRespaldo"><span>Respaldo de los datos</span><span class="meta">›</span></button>' : ''}
     ${esDueno() ? '<button type="button" class="list-item" data-act="usuarios"><span>Usuarios y teléfonos</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="cambiarPin"><span>Cambiar mi PIN</span><span class="meta">›</span></button>
     ${esDueno() ? '<button type="button" class="list-item" data-act="completarTasas"><span>Calcular tasas del historial</span><span class="meta">›</span></button>' : ''}
@@ -930,8 +931,9 @@ const ACT = {
     const tel = c ? telWa(c.Telefono) : '';
     abrirHoja(`<h3>${esc(o.Numero)} · ${esc(o.ClienteNombre)}</h3><div class="sub">${usd(o.SaldoUSD)} · ${hace(o.FechaCierre)}</div>
       <div class="actions">
+        <button type="button" class="btn wa block" data-act="reenviarCotizacion" data-id="${o.ID}">Reenviar cotización por WhatsApp</button>
         <button type="button" class="btn block" data-act="editarOrden" data-id="${o.ID}">Editar precios o cortesía</button>
-        <a class="btn wa block" href="${waLink(tel, textoRecordatorio(o))}" target="_blank" rel="noopener" data-act="recordado" data-ids="${o.ID}">Recordar pago por WhatsApp</a>
+        <a class="btn wa-outline block" href="${waLink(tel, textoRecordatorio(o))}" target="_blank" rel="noopener" data-act="recordado" data-ids="${o.ID}">Recordar pago (mensaje corto)</a>
         ${esGerencia() ? `<button type="button" class="btn danger block" data-act="eliminarCotizacion" data-id="${o.ID}">Eliminar cotización</button>` : ''}
         <button type="button" class="btn ghost block" data-act="cerrarHoja">Volver</button></div>`);
   },
@@ -940,6 +942,15 @@ const ACT = {
     await conEspera(el, async () => {
       const r = await api('eliminarCotizacion', { id: el.dataset.id });
       aplicarEstado(r.estado); cerrarHoja(); render(); toast('Cotización eliminada');
+    });
+  },
+  compartirTexto() {
+    navigator.share({ text: S.finalizado.texto }).catch(() => { /* el usuario canceló */ });
+  },
+  async reenviarCotizacion(el) {
+    await conEspera(el, async () => {
+      const r = await api('textoCotizacion', { id: el.dataset.id });
+      hojaFinalizado(r, 'Reenviar cotización ' + r.numero);
     });
   },
   copiarTexto() {
@@ -1139,15 +1150,26 @@ const ACT = {
   },
 };
 
+/** Enlace directo a la app de WhatsApp (alternativa cuando wa.me no la abre). */
+function waApp(tel, text) {
+  return 'whatsapp://send?' + (tel ? 'phone=' + tel + '&' : '') + 'text=' + encodeURIComponent(text);
+}
+
 function hojaFinalizado(r, titulo) {
+  S.finalizado = r;
   abrirHoja(`<h3>${esc(titulo || 'Cotización ' + r.numero + ' lista')}</h3>
     <div class="big-amount">${usd(r.totalUsd)}<small>${r.esCortesia ? 'Cortesía' : bs(r.totalBs)}</small></div>
     <div class="actions">
       <a class="btn wa block" href="${waLink(r.telefonoWa, r.texto)}" target="_blank" rel="noopener">Enviar por WhatsApp</a>
-      <button type="button" class="btn block" data-act="copiarTexto">Copiar mensaje</button>
+      <div class="row2">
+        <a class="btn" href="${waApp(r.telefonoWa, r.texto)}">Abrir WhatsApp directo</a>
+        ${navigator.share ? '<button type="button" class="btn" data-act="compartirTexto">Compartir…</button>' : '<button type="button" class="btn" data-act="copiarTexto">Copiar mensaje</button>'}
+      </div>
+      ${navigator.share ? '<button type="button" class="btn block" data-act="copiarTexto">Copiar mensaje</button>' : ''}
       ${r.esCortesia ? '' : '<button type="button" class="btn ok block" data-act="cobrarFinalizado">Cobrar ahora</button>'}
       <button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button>
     </div>
+    <p class="note">¿No se abrió WhatsApp? Prueba "Abrir WhatsApp directo"${navigator.share ? ' o "Compartir"' : ' o "Copiar mensaje"'}. Si cierras esta ventana, puedes reenviarla cuando quieras desde Por cobrar → ⋯ → Reenviar cotización.</p>
     ${r.telefonoWa ? '' : '<p class="note warn">El cliente no tiene teléfono: WhatsApp le pedirá elegir el contacto.</p>'}`);
 }
 
@@ -2742,6 +2764,44 @@ INP.cierreReal = function (el) {
 };
 
 CH.cierreFecha = function (el) { if (el.value) abrirCierre(el.value); };
+
+// -----------------------------------------------------------------------------
+// RESPALDO: copia de la hoja en Google Drive (automática cada mes o al momento)
+// -----------------------------------------------------------------------------
+
+function pintarRespaldo(info) {
+  const u = info.ultimo;
+  abrirHoja(`<h3>Respaldo de los datos</h3>
+    <div class="sub">Copia completa de tu hoja en Google Drive, carpeta "${esc(info.carpeta)}". Se guardan las últimas 12.</div>
+    <div class="card mt">
+      <div class="card-row"><span>Último respaldo</span><b>${u ? fechaCorta(u.fecha) + ' · ' + hace(u.fecha) : 'Ninguno todavía'}</b></div>
+      <div class="card-row mt"><span>Respaldo mensual</span>
+        <span class="badge ${info.mensualActivo ? 'ok' : 'warn'}">${info.mensualActivo ? 'Activo · día 1 de cada mes' : 'Sin activar'}</span></div>
+      ${u ? `<a class="btn small block mt" href="${esc(u.url)}" target="_blank" rel="noopener">Abrir el último respaldo</a>` : ''}
+    </div>
+    ${info.mensualActivo ? '' : '<p class="note warn">Para activarlo, en Apps Script ejecuta una vez la función instalarRespaldoMensual.</p>'}
+    <div class="actions">
+      <button type="button" class="btn primary block" data-act="respaldarAhora">Hacer respaldo ahora</button>
+      <button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+Object.assign(ACT, {
+  async hojaRespaldo() {
+    abrirHoja('<h3>Respaldo de los datos</h3><div class="empty"><span class="spinner"></span></div>');
+    try {
+      pintarRespaldo(await api('respaldoInfo'));
+    } catch (e) {
+      cerrarHoja();
+      toast(e.message, true);
+    }
+  },
+  async respaldarAhora(el) {
+    await conEspera(el, async () => {
+      pintarRespaldo(await api('respaldar', {}, 'resp' + Date.now().toString(36)));
+      toast('Respaldo creado ✓');
+    });
+  },
+});
 
 // -----------------------------------------------------------------------------
 // Inicio
