@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.12.0';
 
 const K = {
   url: 'bur_api',
@@ -15,6 +15,7 @@ const K = {
   oldUrl: 'bur_app_anterior',
   fin: 'bur_fin',
   cola: 'bur_cola',
+  apiVersion: 'bur_api_version',
 };
 
 const ls = {
@@ -215,6 +216,11 @@ async function apiSinMedir(accion, datos, idem) {
       .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
     throw errorDeRed('El servidor no respondió correctamente (' + res.status + '). ' +
       (motivo ? 'Detalle: ' + motivo + '. ' : '') + 'Revise si se guardó antes de repetir.');
+  }
+
+  if (json.version) {
+    S.apiVersion = json.version;
+    ls.set(K.apiVersion, json.version);
   }
 
   if (!json.ok) {
@@ -742,7 +748,8 @@ function hojaDetalleCliente(id) {
   const c = clientePorId(id);
   if (!c) return;
   const tel = telWa(c.Telefono);
-  abrirHoja(`<h3>${esc(c.Nombre)}</h3><div class="sub">${esc(c.Telefono ? telLocal(c.Telefono) : 'Sin teléfono')}</div>
+  abrirHoja(`<div class="card-row"><div><h3>${esc(c.Nombre)}</h3><div class="sub">${esc(c.Telefono ? telLocal(c.Telefono) : 'Sin teléfono')}</div></div>
+      <button type="button" class="btn small" data-act="editarCliente" data-id="${c.ID}">Editar</button></div>
     <div class="row2 mt">
       ${c.Telefono ? `<a class="btn" href="tel:${esc(telLocal(c.Telefono).replace('-', ''))}">📞 Llamar</a>` : '<span></span>'}
       ${tel ? `<a class="btn wa" href="${waLink(tel, '¡Hola, Sr(a). ' + c.Nombre.trim() + '! Le saludamos de Autolavado Burbujas.')}" target="_blank" rel="noopener">WhatsApp</a>` : '<span></span>'}
@@ -750,7 +757,8 @@ function hojaDetalleCliente(id) {
     <button type="button" class="btn primary block mt" data-act="ordenParaCliente" data-id="${c.ID}">Nueva orden para este cliente</button>
     ${cfgCrecer() && cfgCrecer().fidelidadCada ? `<p class="note">${tienePremio(c.ID) ? '🎁 Tiene un lavado gratis' : '⭐ Fidelidad: ' + progresoCliente(c.ID) + ' de ' + cfgCrecer().fidelidadCada + ' visitas'}</p>` : ''}
     <h2 class="section">Vehículos</h2>
-    ${(c.Vehiculos || []).map((v) => `<div class="list-item" style="cursor:default"><div>${esc(v.Vehiculo || 'Vehículo')}</div><span class="meta">${esc(v.Placa)}</span></div>`).join('') || '<div class="empty">Sin vehículos.</div>'}
+    ${(c.Vehiculos || []).map((v) => `<div class="list-item" style="cursor:default"><div><div>${esc(v.Vehiculo || 'Vehículo')}</div><span class="meta">${esc(v.Placa)}</span></div>
+      <button type="button" class="btn small ghost" data-act="editarVehiculo" data-id="${v.ID}" data-cliente="${c.ID}">Editar</button></div>`).join('') || '<div class="empty">Sin vehículos.</div>'}
     <button type="button" class="btn small" data-act="nuevoVehiculo" data-id="${c.ID}">+ Agregar vehículo</button>
     ${c.Notas ? `<p class="note">📝 ${esc(c.Notas)}</p>` : ''}
     <h2 class="section">Historial</h2><div id="historial" class="history"><div class="empty"><span class="spinner"></span></div></div>`);
@@ -801,13 +809,14 @@ function viewMas() {
     <div class="card">${velocidadHTML()}</div>
 
     <h2 class="section">Datos de pago móvil</h2>
-    <div class="card"><div class="meta">${esc(cfg.Banco)} · ${esc(cfg.Telefono_Pago_Movil)} · ${esc(cfg.Cedula_RIF)}</div>
-      <div class="meta">Se cambian en la pestaña Config de la hoja.</div></div>
+    <div class="card"><div class="card-row"><div class="meta">${esc(cfg.Banco)} · ${esc(cfg.Telefono_Pago_Movil)} · ${esc(cfg.Cedula_RIF)}</div>
+      ${esDueno() ? '<button type="button" class="btn small" data-act="editarConfigPago">Editar</button>' : ''}</div></div>
 
     <h2 class="section">Opciones</h2>
     ${old ? `<a class="list-item" href="${esc(old)}" target="_blank" rel="noopener"><span>Finanzas y resúmenes (app anterior)</span><span class="meta">↗</span></a>` : ''}
     <button type="button" class="list-item" data-act="appAnterior"><span>${old ? 'Cambiar enlace de la app anterior' : 'Enlazar la app anterior (finanzas)'}</span><span class="meta">›</span></button>
     <button type="button" class="list-item" data-act="nav" data-v="cobranza"><span>Cobranza</span><span class="meta">›</span></button>
+    ${esGerencia() ? '<button type="button" class="list-item" data-act="servicios"><span>Servicios y precios</span><span class="meta">›</span></button>' : ''}
     ${esDueno() ? '<button type="button" class="list-item" data-act="hojaRespaldo"><span>Respaldo de los datos</span><span class="meta">›</span></button>' : ''}
     ${esDueno() ? '<button type="button" class="list-item" data-act="usuarios"><span>Usuarios y teléfonos</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="cambiarPin"><span>Cambiar mi PIN</span><span class="meta">›</span></button>
@@ -815,7 +824,7 @@ function viewMas() {
     ${esGerencia() ? '<button type="button" class="list-item" data-act="nav" data-v="crecer"><span>Crecer: clientes, fidelidad y promociones</span><span class="meta">›</span></button>' : ''}
     <button type="button" class="list-item" data-act="refrescarTodo"><span>Recargar todos los datos</span><span class="meta">↻</span></button>
     <button type="button" class="list-item" data-act="logout"><span style="color:var(--danger)">Cerrar sesión en este teléfono</span><span></span></button>
-    <p class="note" style="text-align:center">Burbujas app ${APP_VERSION}</p></main>`;
+    <p class="note" style="text-align:center">Burbujas app ${APP_VERSION} · servidor ${esc(S.apiVersion || ls.get(K.apiVersion) || '—')}</p></main>`;
 }
 
 async function hojaUsuarios(data) {
@@ -914,6 +923,7 @@ const ACT = {
     const o = buscarOrden(el.dataset.id);
     abrirHoja(`<h3>${esc(o.ClienteNombre)}</h3><div class="sub">${vehiculoTexto(o)}</div>
       <div class="actions"><button type="button" class="btn block" data-act="editarOrden" data-id="${o.ID}">Editar servicios y precios</button>
+      <button type="button" class="btn block" data-act="cambiarVehiculoOrden" data-id="${o.ID}">Cambiar vehículo</button>
       <button type="button" class="btn danger block" data-act="cancelarOrden" data-id="${o.ID}">Cancelar esta orden</button>
       <button type="button" class="btn ghost block" data-act="cerrarHoja">Volver</button></div>`);
   },
@@ -933,6 +943,7 @@ const ACT = {
       <div class="actions">
         <button type="button" class="btn wa block" data-act="reenviarCotizacion" data-id="${o.ID}">Reenviar cotización por WhatsApp</button>
         <button type="button" class="btn block" data-act="editarOrden" data-id="${o.ID}">Editar precios o cortesía</button>
+        <button type="button" class="btn block" data-act="cambiarVehiculoOrden" data-id="${o.ID}">Cambiar vehículo</button>
         <a class="btn wa-outline block" href="${waLink(tel, textoRecordatorio(o))}" target="_blank" rel="noopener" data-act="recordado" data-ids="${o.ID}">Recordar pago (mensaje corto)</a>
         ${esGerencia() ? `<button type="button" class="btn danger block" data-act="eliminarCotizacion" data-id="${o.ID}">Eliminar cotización</button>` : ''}
         <button type="button" class="btn ghost block" data-act="cerrarHoja">Volver</button></div>`);
@@ -1521,8 +1532,15 @@ function pintarForm() {
 
 const HOJAS_FORM = {
   movimiento(f) {
+    const cats = f.tipo === 'EGRESO' ? ['Pago empleado', 'Compra de insumos', 'Comisión bancaria', 'Otro egreso']
+      : f.tipo === 'INGRESO' && !f.ordenId ? ['Venta de producto', 'Otro ingreso'] : [];
+    const puedeMoneda = ['EGRESO', 'INGRESO', 'RETIRO_SOCIO', 'PRESTAMO_ENTREGADO', 'ABONO_PRESTAMO'].includes(f.tipo);
     return `<h3>Editar movimiento</h3><div class="sub">${esc(f.titulo)}</div>
+      ${cats.length ? `<div class="pills">${cats.map((c) => `<button type="button" class="pill ${f.categoria === c ? 'on' : ''}" data-act="fSet" data-k="categoria" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>` : ''}
+      ${puedeMoneda ? monedaHTML() : ''}
+      ${f.moneda !== f.monedaOriginal ? '<p class="note warn">Cambias la moneda: revisa que el monto esté en ' + (f.moneda === 'VES' ? 'bolívares' : 'dólares') + '.</p>' : ''}
       ${campo(f.moneda === 'VES' ? 'Monto (Bs)' : 'Monto ($)', 'monto')}
+      ${f.persona !== '' || f.categoria === 'Pago empleado' ? campo('Persona', 'persona', 'autocomplete="off"') : ''}
       ${fechaTasaHTML()}
       ${campo('Nota', 'notas', 'autocomplete="off"')}
       ${botonesForm('Guardar cambios')}`;
@@ -1683,7 +1701,10 @@ function datosForm() {
   }
   if (f.hoja === 'movimiento') {
     if (!(fNum('monto') > 0)) throw new Error('Indique el monto.');
-    return ['editarMovimiento', { id: f.movId, monto: fNum('monto'), fecha: f.fecha, tasa, notas: f.notas, mes: S.finMes }];
+    return ['editarMovimiento', {
+      id: f.movId, monto: fNum('monto'), fecha: f.fecha, tasa, notas: f.notas, mes: S.finMes,
+      moneda: f.moneda, categoria: f.categoria, persona: f.persona,
+    }];
   }
   if (f.hoja === 'corte') {
     const deudas = {};
@@ -1754,7 +1775,8 @@ Object.assign(ACT, {
   editarMov(el) {
     const x = S.fin.movimientos.find((m) => String(m.ID) === String(el.dataset.id));
     const extra = {
-      movId: x.ID, moneda: x.Moneda, monto: fmtIn(x.Monto), fecha: x.Fecha, notas: x.Notas || '',
+      movId: x.ID, moneda: x.Moneda, monedaOriginal: x.Moneda, monto: fmtIn(x.Monto), fecha: x.Fecha, notas: x.Notas || '',
+      tipo: x.Tipo, categoria: x.Categoria, persona: x.Persona || '', ordenId: x.OrdenID || '',
       titulo: x.Categoria + (x.Persona ? ' · ' + x.Persona : ''),
     };
     if (x.Moneda === 'VES' && x.Tasa) extra.tasa = String(x.Tasa).replace('.', ',');
@@ -2799,6 +2821,189 @@ Object.assign(ACT, {
     await conEspera(el, async () => {
       pintarRespaldo(await api('respaldar', {}, 'resp' + Date.now().toString(36)));
       toast('Respaldo creado ✓');
+    });
+  },
+});
+
+// -----------------------------------------------------------------------------
+// EDITAR CLIENTE Y VEHÍCULOS
+// -----------------------------------------------------------------------------
+
+Object.assign(ACT, {
+  editarCliente(el) {
+    const c = clientePorId(el.dataset.id);
+    S.codigoHoja = nuevoCodigo();
+    abrirHoja(`<h3>Editar cliente</h3>
+      <label class="field">Nombre *<input class="input" id="ec-nombre" autocomplete="off" value="${esc(c.Nombre)}"></label>
+      <label class="field">Teléfono<input class="input" id="ec-tel" type="tel" inputmode="tel" value="${esc(c.Telefono ? telLocal(c.Telefono) : '')}" placeholder="0414 1234567"></label>
+      <label class="field">Notas<textarea class="input" id="ec-notas" placeholder="Opcional">${esc(c.Notas || '')}</textarea></label>
+      <p class="note">Las órdenes en proceso y las cotizaciones por cobrar se actualizan con el nombre nuevo. Las ya pagadas conservan el anterior.</p>
+      <div class="actions"><button type="button" class="btn primary block" data-act="guardarEdicionCliente" data-id="${c.ID}">Guardar cambios</button>
+      <button type="button" class="btn ghost block" data-act="verCliente" data-id="${c.ID}">Cancelar</button></div>`);
+  },
+  async guardarEdicionCliente(el) {
+    const datos = {
+      id: el.dataset.id,
+      Nombre: document.getElementById('ec-nombre').value,
+      Telefono: document.getElementById('ec-tel').value,
+      Notas: document.getElementById('ec-notas').value,
+    };
+    if (!datos.Nombre.trim()) { toast('Escriba el nombre del cliente.', true); return; }
+    await conEspera(el, async () => {
+      const r = await api('editarCliente', datos, S.codigoHoja);
+      actualizarCliente(r.cliente);
+      sync(false, true);
+      hojaDetalleCliente(r.cliente.ID);
+      toast('Cliente actualizado ✓');
+    });
+  },
+  editarVehiculo(el) {
+    const c = clientePorId(el.dataset.cliente);
+    const v = (c.Vehiculos || []).find((x) => String(x.ID) === String(el.dataset.id));
+    S.codigoHoja = nuevoCodigo();
+    abrirHoja(`<h3>Editar vehículo</h3><div class="sub">${esc(c.Nombre)}</div>
+      <label class="field">Placa<input class="input" id="ev-placa" autocapitalize="characters" autocomplete="off" value="${esc(v.Placa)}"></label>
+      <label class="field">Vehículo<input class="input" id="ev-veh" autocomplete="off" value="${esc(v.Vehiculo)}" placeholder="Marca modelo color"></label>
+      <div class="actions"><button type="button" class="btn primary block" data-act="guardarVehiculoEditado" data-id="${v.ID}">Guardar cambios</button>
+      ${esGerencia() ? `<button type="button" class="btn danger block" data-act="quitarVehiculo" data-id="${v.ID}">Quitar este vehículo</button>` : ''}
+      <button type="button" class="btn ghost block" data-act="verCliente" data-id="${c.ID}">Cancelar</button></div>`);
+  },
+  async guardarVehiculoEditado(el) {
+    const datos = { id: el.dataset.id, Placa: document.getElementById('ev-placa').value, Vehiculo: document.getElementById('ev-veh').value };
+    if (!datos.Placa.trim() && !datos.Vehiculo.trim()) { toast('Indique la placa o el vehículo.', true); return; }
+    await conEspera(el, async () => {
+      const r = await api('editarVehiculo', datos, S.codigoHoja);
+      actualizarCliente(r.cliente);
+      hojaDetalleCliente(r.cliente.ID);
+      toast('Vehículo actualizado ✓');
+    });
+  },
+  async quitarVehiculo(el) {
+    if (!confirm('¿Quitar este vehículo del cliente? Si tiene órdenes, se conservan en el historial.')) return;
+    await conEspera(el, async () => {
+      const r = await api('quitarVehiculo', { id: el.dataset.id }, 'qv' + el.dataset.id);
+      actualizarCliente(r.cliente);
+      hojaDetalleCliente(r.cliente.ID);
+      toast('Vehículo quitado');
+    });
+  },
+});
+
+// -----------------------------------------------------------------------------
+// EDICIÓN: servicios y precios, datos de pago móvil, vehículo de una orden
+// -----------------------------------------------------------------------------
+
+function pintarCatalogo(lista) {
+  S.catalogoTodo = lista;
+  const fila = (s) => `<div class="list-item" style="cursor:default;${s.Activo ? '' : 'opacity:.55'}">
+      <div><div style="font-weight:600">${esc(s.Nombre)}</div><div class="meta">${usd(s.Precio_USD)} · ${esc(s.Tipo)}${s.Activo ? '' : ' · inactivo'}</div></div>
+      ${esDueno() ? `<button type="button" class="btn small ghost" data-act="editarServicio" data-id="${s.ID}">Editar</button>` : ''}</div>`;
+  abrirHoja(`<h3>Servicios y precios</h3>
+    <div class="sub">Lo que aparece al registrar una orden. Cambiar un precio no altera las órdenes anteriores.</div>
+    <div class="mt">${lista.filter((s) => s.Activo).map(fila).join('')}</div>
+    ${lista.some((s) => !s.Activo) ? '<h2 class="section">Inactivos</h2>' + lista.filter((s) => !s.Activo).map(fila).join('') : ''}
+    <div class="actions">
+      ${esDueno() ? '<button type="button" class="btn primary block" data-act="editarServicio" data-id="">+ Agregar servicio o producto</button>' : ''}
+      <button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+function hojaServicio(s) {
+  S.codigoHoja = nuevoCodigo();
+  abrirHoja(`<h3>${s ? 'Editar servicio' : 'Nuevo servicio o producto'}</h3>
+    <label class="field">Nombre<input class="input" id="sv-nombre" autocomplete="off" value="${esc(s ? s.Nombre : '')}"></label>
+    <div class="row2">
+      <label class="field">Precio ($)<input class="input" id="sv-precio" inputmode="decimal" value="${s ? fmtIn(s.Precio_USD) : ''}"></label>
+      <label class="field">Tipo<select class="input" id="sv-tipo">
+        <option value="Servicio" ${!s || s.Tipo === 'Servicio' ? 'selected' : ''}>Servicio</option>
+        <option value="Producto" ${s && s.Tipo === 'Producto' ? 'selected' : ''}>Producto</option></select></label>
+    </div>
+    <label class="field" style="display:flex;align-items:center;gap:10px;font-size:16px;color:var(--text)">
+      <input type="checkbox" id="sv-activo" ${!s || s.Activo ? 'checked' : ''} style="width:22px;height:22px"> Activo (aparece al registrar órdenes)</label>
+    <div class="actions"><button type="button" class="btn primary block" data-act="guardarServicio" data-id="${s ? s.ID : ''}">Guardar</button>
+    <button type="button" class="btn ghost block" data-act="servicios">Volver</button></div>`);
+}
+
+function hojaConfigPago() {
+  const c = S.data.config || {};
+  const pct = S.fin && S.fin.comisionPct != null ? S.fin.comisionPct : 0.3;
+  S.codigoHoja = nuevoCodigo();
+  abrirHoja(`<h3>Datos de pago móvil</h3><div class="sub">Salen en cada cotización y recordatorio que envías.</div>
+    <label class="field">Banco<input class="input" id="cp-banco" autocomplete="off" value="${esc(c.Banco)}"></label>
+    <label class="field">Teléfono de pago móvil<input class="input" id="cp-tel" inputmode="tel" value="${esc(c.Telefono_Pago_Movil)}"></label>
+    <label class="field">Cédula o RIF<input class="input" id="cp-ced" autocomplete="off" value="${esc(c.Cedula_RIF)}"></label>
+    <label class="field">Titular (opcional)<input class="input" id="cp-tit" autocomplete="off" value="${esc(c.Titular)}"></label>
+    <label class="field">Comisión del banco por pago móvil (%)<input class="input" id="cp-pct" inputmode="decimal" value="${String(pct).replace('.', ',')}"></label>
+    <div class="actions"><button type="button" class="btn primary block" data-act="guardarConfigPago">Guardar</button>
+    <button type="button" class="btn ghost block" data-act="cerrarHoja">Cancelar</button></div>`);
+}
+
+Object.assign(ACT, {
+  async servicios() {
+    abrirHoja('<h3>Servicios y precios</h3><div class="empty"><span class="spinner"></span></div>');
+    try {
+      pintarCatalogo(await api('catalogo'));
+    } catch (e) {
+      cerrarHoja();
+      toast(e.message, true);
+    }
+  },
+  editarServicio(el) {
+    hojaServicio(el.dataset.id ? S.catalogoTodo.find((s) => String(s.ID) === String(el.dataset.id)) : null);
+  },
+  async guardarServicio(el) {
+    const datos = {
+      ID: el.dataset.id || '',
+      Nombre: document.getElementById('sv-nombre').value,
+      Precio_USD: parseNum(document.getElementById('sv-precio').value),
+      Tipo: document.getElementById('sv-tipo').value,
+      Activo: document.getElementById('sv-activo').checked,
+    };
+    if (!datos.Nombre.trim()) { toast('Escriba el nombre.', true); return; }
+    if (isNaN(datos.Precio_USD) || datos.Precio_USD < 0) { toast('Precio no válido.', true); return; }
+    await conEspera(el, async () => {
+      const r = await api('servicioGuardar', datos, S.codigoHoja);
+      S.data.catalogo = r.activos;
+      guardarCache();
+      pintarCatalogo(r.catalogo);
+      toast('Servicio guardado ✓');
+    });
+  },
+  editarConfigPago() { hojaConfigPago(); },
+  async guardarConfigPago(el) {
+    const datos = {
+      Banco: document.getElementById('cp-banco').value,
+      Telefono_Pago_Movil: document.getElementById('cp-tel').value,
+      Cedula_RIF: document.getElementById('cp-ced').value,
+      Titular: document.getElementById('cp-tit').value,
+      Comision_PagoMovil_Pct: parseNum(document.getElementById('cp-pct').value),
+    };
+    await conEspera(el, async () => {
+      const r = await api('guardarConfigPago', datos, S.codigoHoja);
+      S.data.config = { Banco: r.Banco, Telefono_Pago_Movil: r.Telefono_Pago_Movil, Cedula_RIF: r.Cedula_RIF, Titular: r.Titular };
+      if (S.fin) S.fin.comisionPct = r.Comision_PagoMovil_Pct;
+      guardarCache();
+      cerrarHoja();
+      render();
+      toast('Datos de pago actualizados ✓');
+    });
+  },
+  cambiarVehiculoOrden(el) {
+    const o = buscarOrden(el.dataset.id);
+    const c = clientePorId(o.ClienteID);
+    const vehiculos = (c && c.Vehiculos) || [];
+    abrirHoja(`<h3>Cambiar vehículo</h3><div class="sub">${esc(o.ClienteNombre)} · ahora: ${vehiculoTexto(o) || 'sin vehículo'}</div>
+      <div class="pills">${vehiculos.map((v) => `<button type="button" class="pill ${o.Placa === v.Placa && o.Vehiculo === v.Vehiculo ? 'on' : ''}" data-act="elegirVehiculoOrden" data-orden="${o.ID}" data-id="${v.ID}">
+        ${esc([v.Vehiculo, v.Placa].filter(Boolean).join(' · ') || 'Vehículo ' + v.ID)}</button>`).join('')}</div>
+      <p class="note">¿No está en la lista? Agrégalo primero en Clientes → ${esc(o.ClienteNombre)} → + Agregar vehículo.</p>
+      <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cancelar</button></div>`);
+  },
+  async elegirVehiculoOrden(el) {
+    await conEspera(el, async () => {
+      const r = await api('cambiarVehiculoOrden', { id: el.dataset.orden, vehiculoId: el.dataset.id }, 'cv' + el.dataset.orden + 'v' + el.dataset.id);
+      aplicarEstado(r.estado);
+      cerrarHoja();
+      render();
+      toast('Vehículo cambiado ✓');
     });
   },
 });
