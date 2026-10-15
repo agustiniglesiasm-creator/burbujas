@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.13.0';
 
 const K = {
   url: 'bur_api',
@@ -816,6 +816,8 @@ function viewMas() {
     ${old ? `<a class="list-item" href="${esc(old)}" target="_blank" rel="noopener"><span>Finanzas y resúmenes (app anterior)</span><span class="meta">↗</span></a>` : ''}
     <button type="button" class="list-item" data-act="appAnterior"><span>${old ? 'Cambiar enlace de la app anterior' : 'Enlazar la app anterior (finanzas)'}</span><span class="meta">›</span></button>
     <button type="button" class="list-item" data-act="nav" data-v="cobranza"><span>Cobranza</span><span class="meta">›</span></button>
+    ${esGerencia() ? '<button type="button" class="list-item" data-act="resumenDiario"><span>Resumen diario</span><span class="meta">›</span></button>' : ''}
+    ${esGerencia() ? '<button type="button" class="list-item" data-act="resumenMensual"><span>Resumen mensual</span><span class="meta">›</span></button>' : ''}
     ${esGerencia() ? '<button type="button" class="list-item" data-act="servicios"><span>Servicios y precios</span><span class="meta">›</span></button>' : ''}
     ${esDueno() ? '<button type="button" class="list-item" data-act="hojaRespaldo"><span>Respaldo de los datos</span><span class="meta">›</span></button>' : ''}
     ${esDueno() ? '<button type="button" class="list-item" data-act="usuarios"><span>Usuarios y teléfonos</span><span class="meta">›</span></button>' : ''}
@@ -1347,7 +1349,10 @@ function viewDinero() {
     <button type="button" class="btn" data-act="hojaCambio">Cambio $ ⇄ Bs</button>
     <button type="button" class="btn" data-act="hojaEmpleados">Empleados</button>
     <button type="button" class="btn" data-act="hojaSocios">Socios</button>
-    <button type="button" class="btn" data-act="hojaCierre">Cierre del día</button></div>`;
+    <button type="button" class="btn" data-act="hojaCierre">Cierre del día</button></div>
+  <div class="row2 mt">
+    <button type="button" class="btn" data-act="resumenDiario">Resumen diario</button>
+    <button type="button" class="btn" data-act="resumenMensual">Resumen mensual</button></div>`;
 
   const m = f.mes;
   const esMesActual = m.clave >= f.hoy.slice(0, 7);
@@ -3007,6 +3012,155 @@ Object.assign(ACT, {
     });
   },
 });
+
+// -----------------------------------------------------------------------------
+// RESÚMENES DIARIO Y MENSUAL (mismos cálculos que la app original)
+// -----------------------------------------------------------------------------
+
+function capitalizar(t) {
+  const x = String(t || '');
+  return x.charAt(0).toUpperCase() + x.slice(1);
+}
+
+function montoDoble(usdV, bsV) {
+  const partes = [];
+  if (usdV) partes.push(usd(usdV));
+  if (bsV) partes.push(bs(bsV));
+  return partes.join(' + ') || usd(0);
+}
+
+function filaDato(label, valor) {
+  return `<div class="card-row" style="padding:5px 0"><span class="muted">${label}</span><b>${valor}</b></div>`;
+}
+
+function botonesCompartirResumen() {
+  return `<div class="row2 mt">
+      ${navigator.share ? '<button type="button" class="btn" data-act="compartirResumen">Compartir…</button>' : ''}
+      <button type="button" class="btn" data-act="copiarResumen">Copiar texto</button></div>`;
+}
+
+async function abrirResumenDiario(fecha) {
+  S.resFecha = fecha || hoyISO();
+  abrirHoja('<h3>Resumen diario</h3><div class="empty"><span class="spinner"></span></div>');
+  try {
+    S.resumen = await api('resumenDiario', { fecha: S.resFecha });
+    pintarResumenDiario();
+  } catch (e) {
+    abrirHoja(`<h3>Resumen diario</h3><div class="empty">${esc(e.message)}</div>
+      <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+  }
+}
+
+function pintarResumenDiario() {
+  const r = S.resumen;
+  const x = r.resumen;
+  abrirHoja(`<h3>Resumen diario</h3>
+    <label class="field">Día<input class="input" type="date" data-ch="resFecha" value="${esc(r.fecha)}" max="${esc(hoyISO())}"></label>
+    <div class="sub mt">${esc(capitalizar(r.fechaTexto))}</div>
+
+    <h2 class="section">Servicios</h2>
+    <div class="card">
+      ${filaDato('Órdenes recibidas', x.ordenesRecibidas)}
+      ${filaDato('Servicios', x.serviciosPrestados)}
+      ${filaDato('Órdenes procesadas', x.ordenesProcesadas)}
+      ${x.ordenesCortesia || x.serviciosCortesia ? filaDato('Cortesías', x.serviciosCortesia + ' servicio(s)') : ''}
+    </div>
+
+    <h2 class="section">Dinero del día</h2>
+    <div class="card">
+      ${filaDato('Cobrado (' + x.cotizacionesPagadas + ' cotizaciones)', montoDoble(x.pagosUsd, x.pagosBs))}
+      ${x.cobrosCxc ? filaDato('Deudas anteriores cobradas', montoDoble(x.cobrosCxcUsd, x.cobrosCxcBs)) : ''}
+      ${filaDato('Gastos (' + x.egresosOperativos + ')', montoDoble(x.egresosUsd, x.egresosBs))}
+      ${x.otrasSalidas ? filaDato('Otras salidas (retiros, préstamos, cambios)', montoDoble(x.otrasSalidasUsd, x.otrasSalidasBs)) : ''}
+    </div>
+
+    ${r.ordenesRecibidas.length ? '<h2 class="section">Órdenes recibidas</h2>' + r.ordenesRecibidas.map((o) => `
+      <div class="list-item" style="cursor:default"><div><div style="font-weight:600">${esc(o.cliente)}</div>
+        <div class="meta">${esc(o.vehiculo || '')}${o.vehiculo ? ' · ' : ''}${esc(o.servicios.map((s) => s.nombre).join(', '))}</div>
+        <div class="meta">${esc(o.numero || 'sin número')} · ${esc(o.estado)}</div></div>
+        <b>${usd(o.totalUsd)}</b></div>`).join('') : ''}
+
+    ${r.pagos.length ? '<h2 class="section">Pagos recibidos</h2>' + r.pagos.map((p) => `
+      <div class="list-item" style="cursor:default"><div><div style="font-weight:600">${esc(p.cliente)}</div>
+        <div class="meta">${esc(p.numero)}${p.referencias.length ? ' · ref. ' + esc(p.referencias.join(', ')) : ''}</div></div>
+        <b style="text-align:right">${montoDoble(p.efectivoUsd + p.otrosUsd, p.pagoMovilBs + p.otrosBs)}</b></div>`).join('') : ''}
+
+    ${r.egresos.length ? '<h2 class="section">Gastos</h2>' + r.egresos.map((g) => `
+      <div class="list-item" style="cursor:default"><div><div style="font-weight:600">${esc(g.categoria)}</div>
+        <div class="meta">${esc(g.persona || g.notas || '')}</div></div><b>${montoDoble(g.usd, g.bs)}</b></div>`).join('') : ''}
+
+    ${r.otrasSalidas.length ? '<h2 class="section">Otras salidas</h2>' + r.otrasSalidas.map((g) => `
+      <div class="list-item" style="cursor:default"><div><div style="font-weight:600">${esc(g.categoria || g.tipo)}</div>
+        <div class="meta">${esc(g.persona || '')}</div></div><b>${montoDoble(g.usd, g.bs)}</b></div>`).join('') : ''}
+
+    ${botonesCompartirResumen()}
+    <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+async function abrirResumenMensual(mes) {
+  S.resMes = mes || hoyISO().slice(0, 7);
+  abrirHoja('<h3>Resumen mensual</h3><div class="empty"><span class="spinner"></span></div>');
+  try {
+    S.resumen = await api('resumenMensual', { mes: S.resMes });
+    pintarResumenMensual();
+  } catch (e) {
+    abrirHoja(`<h3>Resumen mensual</h3><div class="empty">${esc(e.message)}</div>
+      <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+  }
+}
+
+function pintarResumenMensual() {
+  const r = S.resumen;
+  const x = r.resumen;
+  const esActual = r.mes >= hoyISO().slice(0, 7);
+  abrirHoja(`<h3>Resumen mensual</h3>
+    <div class="month-nav" style="margin-top:8px"><button type="button" class="btn small" data-act="resMesCambio" data-d="-1" aria-label="Mes anterior">‹</button>
+      <b>${esc(capitalizar(r.mesTexto))}</b>
+      <button type="button" class="btn small" data-act="resMesCambio" data-d="1" ${esActual ? 'disabled' : ''} aria-label="Mes siguiente">›</button></div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="label">Servicios</div><div class="value">${x.serviciosPrestados}</div><div class="hint">${x.ordenesRecibidas} órdenes · ${x.diasConActividad} días</div></div>
+      <div class="kpi"><div class="label">Cotizaciones pagadas</div><div class="value">${x.cotizacionesPagadas}</div>${x.ordenesCortesia ? `<div class="hint">${x.ordenesCortesia} cortesía(s)</div>` : ''}</div>
+      <div class="kpi wide"><div class="label">Cobrado</div><div class="value" style="font-size:19px">${montoDoble(x.pagosUsd, x.pagosBs)}</div>
+        ${x.cobrosCxc ? `<div class="hint">+ deudas anteriores: ${montoDoble(x.cobrosCxcUsd, x.cobrosCxcBs)}</div>` : ''}</div>
+      <div class="kpi wide"><div class="label">Gastos (${x.egresosOperativos})</div><div class="value" style="font-size:19px">${montoDoble(x.egresosUsd, x.egresosBs)}</div>
+        ${x.otrasSalidas ? `<div class="hint">Otras salidas: ${montoDoble(x.otrasSalidasUsd, x.otrasSalidasBs)}</div>` : ''}</div>
+    </div>
+    <p class="note">Montos en la moneda en que entraron o salieron. Para la ganancia en dólares, mira Dinero.</p>
+
+    ${r.servicios.length ? '<h2 class="section">Servicios del mes</h2><div class="card" style="padding:6px 12px">' + r.servicios.map((s) => `
+      <div class="hist-row cierre" style="grid-template-columns:2fr .7fr 1fr"><span>${esc(s.nombre)}</span><span>${s.cantidad}${s.cortesias ? ' (' + s.cortesias + ' cort.)' : ''}</span><span>${usd(s.importeUsd)}</span></div>`).join('') + '</div>' : ''}
+
+    ${r.egresosPorCategoria.length ? '<h2 class="section">Gastos por categoría</h2><div class="card" style="padding:6px 12px">' + r.egresosPorCategoria.map((g) => `
+      <div class="hist-row cierre" style="grid-template-columns:1.6fr 1fr"><span>${esc(g.categoria)} (${g.movimientos})</span><span>${montoDoble(g.usd, g.bs)}</span></div>`).join('') + '</div>' : ''}
+
+    ${r.dias.length ? '<h2 class="section">Día por día</h2>' + r.dias.slice().reverse().map((d) => `
+      <button type="button" class="list-item" data-act="resDia" data-f="${esc(d.fecha)}"><div><div style="font-weight:600">${esc(capitalizar(d.fechaTexto))}</div>
+        <div class="meta">${d.ordenesRecibidas} órdenes · cobrado ${montoDoble(d.pagosUsd, d.pagosBs)}${d.egresosOperativos ? ' · gastos ' + montoDoble(d.egresosUsd, d.egresosBs) : ''}</div></div>
+        <span class="meta">›</span></button>`).join('') : '<div class="empty">Sin actividad este mes.</div>'}
+
+    ${botonesCompartirResumen()}
+    <div class="actions"><button type="button" class="btn ghost block" data-act="cerrarHoja">Cerrar</button></div>`);
+}
+
+Object.assign(ACT, {
+  resumenDiario() { abrirResumenDiario(); },
+  resumenMensual() { abrirResumenMensual(); },
+  resDia(el) { abrirResumenDiario(el.dataset.f); },
+  resMesCambio(el) {
+    const [y, m] = S.resMes.split('-').map(Number);
+    const d = new Date(y, m - 1 + Number(el.dataset.d), 1);
+    abrirResumenMensual(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
+  },
+  compartirResumen() {
+    navigator.share({ text: S.resumen.texto }).catch(() => { /* cancelado */ });
+  },
+  copiarResumen() {
+    navigator.clipboard.writeText(S.resumen.texto).then(() => toast('Resumen copiado'), () => toast('No se pudo copiar', true));
+  },
+});
+
+CH.resFecha = function (el) { if (el.value) abrirResumenDiario(el.value); };
 
 // -----------------------------------------------------------------------------
 // Inicio
