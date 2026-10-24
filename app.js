@@ -4,7 +4,7 @@
  * Los datos viven en la hoja de Google; esta app guarda una copia local para
  * abrir al instante y se sincroniza con la API de Apps Script en segundo plano. */
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.14.0';
 
 const K = {
   url: 'bur_api',
@@ -463,6 +463,7 @@ function viewHoy() {
   }
 
   html += `<h2 class="section">En proceso <span class="count">${enProceso.length}</span></h2>`;
+  html += barrasVariosHTML(enProceso);
   html += enProceso.length ? enProceso.map((o) => `
     <article class="card">
       <div class="card-row">
@@ -614,7 +615,7 @@ function setInput(name, value) {
 // -----------------------------------------------------------------------------
 
 function borradorVacio() {
-  return { clienteId: null, vehiculoId: null, sel: {}, notas: '', q: '', verNota: false, codigo: nuevoCodigo(), premio: false, premioId: null, promo: false };
+  return { clienteId: null, vehiculoId: null, sel: {}, notas: '', q: '', verNota: false, codigo: nuevoCodigo(), premio: false, premioId: null, promo: false, lotes: [] };
 }
 
 function guardarBorrador() {
@@ -672,17 +673,22 @@ function viewNueva() {
   }
 
   const vehiculos = c.Vehiculos || [];
-  if (!d.vehiculoId && vehiculos.length === 1) d.vehiculoId = vehiculos[0].ID;
+  const usados = lotesBorrador().map((l) => String(l.vehiculoId));
+  const libres = vehiculos.filter((v) => !usados.includes(String(v.ID)));
+  if (!d.vehiculoId && libres.length === 1 && !usados.length) d.vehiculoId = libres[0].ID;
 
   html += `<div class="selected-client"><div><div style="font-weight:700">${esc(c.Nombre)}</div>
       <div class="meta">${esc(c.Telefono ? telLocal(c.Telefono) : 'Sin teléfono')}</div></div>
       <button type="button" class="btn small" data-act="cambiarCliente">Cambiar</button></div>` + bloqueCrecerNueva(c);
 
+  html += lotesHTML(c);
   html += '<h2 class="section">Vehículo</h2><div class="pills">' +
-    vehiculos.map((v) => `<button type="button" class="pill ${String(d.vehiculoId) === String(v.ID) ? 'on' : ''}" data-act="elegirVehiculo" data-id="${v.ID}">
+    libres.map((v) => `<button type="button" class="pill ${String(d.vehiculoId) === String(v.ID) ? 'on' : ''}" data-act="elegirVehiculo" data-id="${v.ID}">
       ${esc([v.Vehiculo, v.Placa].filter(Boolean).join(' · ') || 'Vehículo ' + v.ID)}</button>`).join('') +
     `<button type="button" class="pill" data-act="nuevoVehiculo" data-id="${c.ID}">+ Vehículo</button></div>` +
-    (d.vehiculoId ? '' : `<p class="note warn">${vehiculos.length ? 'Toque el vehículo que trajo.' : 'Este cliente no tiene vehículos: agregue uno.'}</p>`);
+    (d.vehiculoId ? '' : `<p class="note ${usados.length ? '' : 'warn'}">${usados.length
+      ? (libres.length ? 'Toque el siguiente vehículo, o registre la orden si ya están todos.' : 'Ya agregó todos sus vehículos. Puede registrar, o tocar "+ Vehículo" si trajo otro.')
+      : (vehiculos.length ? 'Toque el vehículo que trajo.' : 'Este cliente no tiene vehículos: agregue uno.')}</p>`);
 
   html += '<h2 class="section">Servicios</h2><div class="svc-grid">' + (S.data.catalogo || []).map((s) => {
     const sel = d.sel[s.ID];
@@ -696,11 +702,17 @@ function viewNueva() {
     ? `<label class="field">Nota de la orden<textarea class="input" data-in="notaOrden" placeholder="Opcional">${esc(d.notas)}</textarea></label>`
     : '<button type="button" class="btn ghost mt" data-act="verNota">+ Agregar nota</button>';
 
-  const total = totalBorrador();
-  const listo = d.vehiculoId && Object.keys(d.sel).length > 0;
+  if (d.vehiculoId && Object.keys(d.sel).length > 0) {
+    html += '<button type="button" class="btn block mt" data-act="otroVehiculo">+ Otro vehículo de este cliente</button>';
+  }
+
+  const nLotes = lotesParaRegistrar().length;
+  const total = totalBorrador() + lotesBorrador().reduce((s2, l) => s2 + totalLote(l.sel), 0);
+  const actualIncompleto = (d.vehiculoId && !Object.keys(d.sel).length) || (!d.vehiculoId && Object.keys(d.sel).length);
+  const listo = nLotes > 0 && !actualIncompleto;
   html += `</main><div class="footer-bar"><div class="inner">
-      <div class="total"><b id="total-usd">${usd(total)}</b><span id="total-bs">${totalBsTexto(total)}</span></div>
-      <button type="button" class="btn primary" data-act="registrarOrden" ${listo ? '' : 'disabled'}>Registrar orden</button>
+      <div class="total"><b id="total-usd">${usd(total)}</b><span id="total-bs">${totalBsTexto(total)}${nLotes > 1 ? ' · ' + nLotes + ' vehículos' : ''}</span></div>
+      <button type="button" class="btn primary" data-act="registrarOrden" ${listo ? '' : 'disabled'}>${nLotes > 1 ? 'Registrar ' + nLotes + ' órdenes' : 'Registrar orden'}</button>
     </div></div>`;
   return html;
 }
@@ -971,6 +983,11 @@ const ACT = {
     navigator.clipboard.writeText(r.texto).then(() => toast('Mensaje copiado'), () => toast('No se pudo copiar', true));
   },
   cobrarFinalizado() {
+    if (S.finalizado.varios) {
+      const g = gruposCobranza().find((x) => String(x.clienteId) === String(S.finalizado.clienteId));
+      if (g) { if (g.ordenes.length === 1) abrirCobro(g.ordenes[0].ID); else abrirCobroMultiple(g); } else cerrarHoja();
+      return;
+    }
     const o = (S.data.pendientes || []).find((p) => p.Numero === S.finalizado.numero && p.SaldoUSD > 0);
     if (o) abrirCobro(o.ID); else cerrarHoja();
   },
@@ -1018,10 +1035,10 @@ const ACT = {
     });
   },
   elegirCliente(el) {
-    Object.assign(S.draft, { clienteId: Number(el.dataset.id), vehiculoId: null, q: '', premio: false, premioId: null });
+    Object.assign(S.draft, { clienteId: Number(el.dataset.id), vehiculoId: null, q: '', premio: false, premioId: null, lotes: [], sel: {} });
     guardarBorrador(); render(); window.scrollTo(0, 0);
   },
-  cambiarCliente() { Object.assign(S.draft, { clienteId: null, vehiculoId: null, premio: false, premioId: null }); guardarBorrador(); render(); },
+  cambiarCliente() { Object.assign(S.draft, { clienteId: null, vehiculoId: null, premio: false, premioId: null, lotes: [], sel: {} }); guardarBorrador(); render(); },
   elegirVehiculo(el) { S.draft.vehiculoId = Number(el.dataset.id); guardarBorrador(); render(); },
   nuevoVehiculo(el) { hojaVehiculo(el.dataset.id); },
   async guardarVehiculo(el) {
@@ -1071,37 +1088,42 @@ const ACT = {
   verNota() { S.draft.verNota = true; render(); const t = document.querySelector('[data-in="notaOrden"]'); if (t) t.focus(); },
   async registrarOrden(el) {
     const d = S.draft;
-    const servicios = Object.entries(d.sel).map(([id, x]) => ({ ID: Number(id), Precio_USD: x.precio, Cortesia: x.cortesia }));
-    const premio = Boolean(d.premio && d.premioId && d.sel[d.premioId]);
-    if (d.premio && !premio) { toast('Elija el lavado para usar el premio, o toque "Usando ✓" para quitarlo.', true); return; }
+    const lotes = lotesParaRegistrar();
+    const conPremio = lotes.some((l) => l.premioId);
+    if (d.premio && !conPremio) { toast('Elija el lavado para usar el premio, o toque "Usando ✓" para quitarlo.', true); return; }
     const cfg = cfgCrecer();
-    const notas = [d.notas, d.promo && cfg ? 'Promoción −' + cfg.promoPct + '%' : '', premio ? 'Lavado gratis por fidelidad' : '']
-      .filter(Boolean).join(' · ');
     if (!d.codigo) d.codigo = nuevoCodigo();
     const c = clientePorId(d.clienteId);
-    const v = c && (c.Vehiculos || []).find((x) => String(x.ID) === String(d.vehiculoId));
-    encolar({
-      accion: 'crearOrden',
-      etiqueta: 'la orden de ' + (c ? c.Nombre : 'cliente'),
-      datos: { clienteId: d.clienteId, vehiculoId: d.vehiculoId, servicios, notas, premio },
-      idem: d.codigo,
-      efecto: {
-        orden: {
-          ID: 'tmp-' + d.codigo, ClienteID: d.clienteId, ClienteNombre: c ? c.Nombre : '',
-          Placa: v ? v.Placa : '', Vehiculo: v ? v.Vehiculo : '', Notas: notas, Estado: 'En proceso',
-          FechaCreacion: new Date().toISOString(), TotalUSD: totalBorrador(), Pendiente: true,
-          Servicios: Object.entries(d.sel).map(([id, x]) => {
-            const sv = S.data.catalogo.find((k) => String(k.ID) === String(id));
-            return { ID: Number(id), Nombre: sv ? sv.Nombre : 'Servicio', Precio_USD: x.cortesia ? 0 : x.precio, Cortesia: x.cortesia };
-          }),
+    lotes.forEach((l, i) => {
+      const premio = Boolean(l.premioId && l.sel[l.premioId]);
+      const servicios = Object.entries(l.sel).map(([id, x]) => ({ ID: Number(id), Precio_USD: x.precio, Cortesia: x.cortesia }));
+      const notas = [d.notas, d.promo && cfg ? 'Promoción −' + cfg.promoPct + '%' : '', premio ? 'Lavado gratis por fidelidad' : '']
+        .filter(Boolean).join(' · ');
+      const v = c && (c.Vehiculos || []).find((x) => String(x.ID) === String(l.vehiculoId));
+      const codigo = i ? d.codigo + 'v' + i : d.codigo;
+      encolar({
+        accion: 'crearOrden',
+        etiqueta: 'la orden de ' + (c ? c.Nombre : 'cliente'),
+        datos: { clienteId: d.clienteId, vehiculoId: l.vehiculoId, servicios, notas, premio },
+        idem: codigo,
+        efecto: {
+          orden: {
+            ID: 'tmp-' + codigo, ClienteID: d.clienteId, ClienteNombre: c ? c.Nombre : '',
+            Placa: v ? v.Placa : '', Vehiculo: v ? v.Vehiculo : '', Notas: notas, Estado: 'En proceso',
+            FechaCreacion: new Date().toISOString(), TotalUSD: totalLote(l.sel), Pendiente: true,
+            Servicios: Object.entries(l.sel).map(([id, x]) => {
+              const sv = S.data.catalogo.find((k) => String(k.ID) === String(id));
+              return { ID: Number(id), Nombre: sv ? sv.Nombre : 'Servicio', Precio_USD: x.cortesia ? 0 : x.precio, Cortesia: x.cortesia };
+            }),
+          },
         },
-      },
+      });
     });
-    if (premio && S.data.crecer && S.data.crecer.progreso) S.data.crecer.progreso[String(d.clienteId)] = 0;
+    if (conPremio && S.data.crecer && S.data.crecer.progreso) S.data.crecer.progreso[String(d.clienteId)] = 0;
     const rec = [d.clienteId].concat(ls.json(K.recents, []).filter((x) => String(x) !== String(d.clienteId))).slice(0, 8);
     ls.set(K.recents, JSON.stringify(rec));
     S.draft = borradorVacio(); guardarBorrador();
-    S.view = 'hoy'; render(); window.scrollTo(0, 0); toast('Orden registrada ✓');
+    S.view = 'hoy'; render(); window.scrollTo(0, 0); toast(lotes.length > 1 ? lotes.length + ' órdenes registradas ✓' : 'Orden registrada ✓');
   },
 
   // Clientes
@@ -3161,6 +3183,136 @@ Object.assign(ACT, {
 });
 
 CH.resFecha = function (el) { if (el.value) abrirResumenDiario(el.value); };
+
+// -----------------------------------------------------------------------------
+// VARIOS VEHÍCULOS DE UN MISMO CLIENTE: una orden por vehículo, un solo aviso
+// -----------------------------------------------------------------------------
+
+function lotesBorrador() {
+  return S.draft.lotes || (S.draft.lotes = []);
+}
+
+function totalLote(sel) {
+  return Object.values(sel).reduce((s, x) => s + (x.cortesia ? 0 : Number(x.precio) || 0), 0);
+}
+
+function nombreVehiculo(c, id) {
+  const v = ((c && c.Vehiculos) || []).find((x) => String(x.ID) === String(id));
+  return v ? [v.Vehiculo, v.Placa].filter(Boolean).join(' · ') || 'Vehículo ' + v.ID : 'Vehículo';
+}
+
+function lotesHTML(c) {
+  const lotes = lotesBorrador();
+  if (!lotes.length) return '';
+  return '<h2 class="section">Vehículos ya agregados</h2>' + lotes.map((l, i) => `
+    <div class="card" style="padding:10px 12px"><div class="card-row">
+      <div><div style="font-weight:600">🚗 ${esc(nombreVehiculo(c, l.vehiculoId))}</div>
+        <div class="meta">${Object.keys(l.sel).map((id) => {
+          const s = S.data.catalogo.find((x) => String(x.ID) === String(id));
+          return esc(s ? s.Nombre : 'Servicio') + (l.sel[id].cortesia ? ' (cortesía)' : '');
+        }).join(', ')}</div></div>
+      <div style="display:flex;align-items:center;gap:6px"><b>${usd(totalLote(l.sel))}</b>
+        <button type="button" class="btn small ghost danger" data-act="quitarLote" data-i="${i}" aria-label="Quitar">✕</button></div>
+    </div></div>`).join('') + '<h2 class="section">Siguiente vehículo</h2>';
+}
+
+/** Lotes listos para registrar: los guardados más el vehículo actual (si está completo). */
+function lotesParaRegistrar() {
+  const d = S.draft;
+  const lotes = lotesBorrador().slice();
+  if (d.vehiculoId && Object.keys(d.sel).length) {
+    lotes.push({ vehiculoId: d.vehiculoId, sel: d.sel, premioId: d.premio && d.premioId && d.sel[d.premioId] ? d.premioId : null });
+  }
+  return lotes;
+}
+
+function textoAvisoVarios(cliente, items, tasa) {
+  const cfg = S.data.config || {};
+  const total = r2(items.reduce((s, it) => s + it.r.totalUsd, 0));
+  const bloques = items.map((it) => {
+    const lineas = (it.orden.Servicios || []).map((s) => '• ' + s.Nombre + ': ' + (s.Cortesia ? 'Cortesía' : '$' + Number(s.Precio_USD || 0).toFixed(2)));
+    return '🚗 ' + ([it.orden.Vehiculo, it.orden.Placa ? '(' + it.orden.Placa + ')' : ''].filter(Boolean).join(' ') || 'Vehículo') +
+      ' — Cotización ' + it.r.numero + '\n' + lineas.join('\n') + '\nSubtotal: $' + it.r.totalUsd.toFixed(2);
+  });
+  const fid = cfgCrecer();
+  const lleva = fid && fid.fidelidadCada ? Math.min(progresoCliente(cliente.ID) + items.length, fid.fidelidadCada) : 0;
+  return '¡Hola, Sr(a). ' + String(cliente.Nombre).trim() + '!\n' +
+    'Le informamos que sus ' + items.length + ' vehículos ya están listos y relucientes.\n\n' +
+    bloques.join('\n\n') + '\n\n' +
+    (total > 0
+      ? 'Total a pagar: $' + total.toFixed(2) + (tasa ? ' (o ' + (total * tasa).toFixed(2) + ' Bs a la tasa BCV de hoy: ' + Number(tasa).toFixed(2) + ')' : '') + '\n\n' +
+        '💳 Datos para Pago Móvil:\n* Banco: ' + cfg.Banco + '\n* Teléfono: ' + cfg.Telefono_Pago_Movil + '\n* RIF/Cédula: ' + cfg.Cedula_RIF + '\n\n' +
+        'Nota: De realizar el pago en un día distinto a hoy, el monto en bolívares se actualizará según la tasa BCV vigente.\n\n'
+      : 'Estos servicios han sido realizados como cortesía.\n\n') +
+    (lleva ? '⭐ Programa de fidelidad: con estos servicios lleva ' + lleva + ' de ' + fid.fidelidadCada + '. ¡Al completar ' + fid.fidelidadCada + ', su siguiente lavado es gratis!\n\n' : '') +
+    '¡Agradecemos mucho su confianza! Lo esperamos en Autolavado Burbujas.';
+}
+
+/** Barra en Hoy para clientes con 2 o más vehículos en proceso. */
+function barrasVariosHTML(enProceso) {
+  const porCliente = {};
+  enProceso.filter((o) => !o.Pendiente).forEach((o) => {
+    (porCliente[o.ClienteID] = porCliente[o.ClienteID] || []).push(o);
+  });
+  return Object.values(porCliente).filter((l) => l.length > 1).map((l) => `
+    <div class="card" style="border-color:var(--brand)"><div class="card-row">
+      <div><div class="name">${esc(l[0].ClienteNombre)}</div><div class="meta">${l.length} vehículos en proceso · ${usd(l.reduce((s, o) => s + o.TotalUSD, 0))}</div></div>
+      <button type="button" class="btn primary small" data-act="finalizarTodos" data-ids="${l.map((o) => o.ID).join(',')}">Finalizar todos y avisar</button>
+    </div></div>`).join('');
+}
+
+Object.assign(ACT, {
+  otroVehiculo() {
+    const d = S.draft;
+    if (!d.vehiculoId || !Object.keys(d.sel).length) { toast('Elija el vehículo y al menos un servicio.', true); return; }
+    lotesBorrador().push({ vehiculoId: d.vehiculoId, sel: d.sel, premioId: d.premio && d.premioId && d.sel[d.premioId] ? d.premioId : null });
+    if (d.premioId && d.sel[d.premioId]) { d.premio = false; d.premioId = null; }
+    d.vehiculoId = null;
+    d.sel = {};
+    guardarBorrador();
+    render();
+    window.scrollTo(0, 0);
+    toast('Vehículo agregado. Elija el siguiente.');
+  },
+  quitarLote(el) {
+    lotesBorrador().splice(Number(el.dataset.i), 1);
+    guardarBorrador();
+    render();
+  },
+  async finalizarTodos(el) {
+    const ids = el.dataset.ids.split(',');
+    const ordenes = ids.map((id) => buscarOrden(id)).filter(Boolean);
+    const cliente = clientePorId(ordenes[0].ClienteID) || { ID: ordenes[0].ClienteID, Nombre: ordenes[0].ClienteNombre, Telefono: '' };
+    el.disabled = true;
+    const items = [];
+    try {
+      for (const o of ordenes) {
+        el.innerHTML = '<span class="spinner"></span> ' + (items.length + 1) + ' de ' + ordenes.length;
+        const r = await api('finalizarOrden', { id: o.ID }, 'fin' + o.ID);
+        aplicarEstado(r.estado);
+        items.push({ orden: o, r });
+      }
+    } catch (e) {
+      render();
+      toast('Se finalizaron ' + items.length + ' de ' + ordenes.length + '. ' + e.message, true);
+      if (!items.length) return;
+    }
+    render();
+    const tasa = items[0].r.tasa || tasaHoy();
+    const total = r2(items.reduce((s, it) => s + it.r.totalUsd, 0));
+    S.finalizado = {
+      numero: items.map((it) => it.r.numero).join(', '),
+      texto: textoAvisoVarios(cliente, items, tasa),
+      telefonoWa: items[0].r.telefonoWa || telWa(cliente.Telefono),
+      totalUsd: total,
+      totalBs: tasa ? total * tasa : 0,
+      esCortesia: total <= 0,
+      clienteId: cliente.ID,
+      varios: true,
+    };
+    hojaFinalizado(S.finalizado, items.length + ' cotizaciones listas · ' + cliente.Nombre);
+  },
+});
 
 // -----------------------------------------------------------------------------
 // Inicio
